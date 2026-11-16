@@ -13,6 +13,14 @@ export const store = {
     this.render();
   },
 
+  duplicateCue(index) {
+    const orig = this.cues[index];
+    if (!orig) return;
+    const copy = { ...orig, id: crypto.randomUUID() };
+    this.cues.splice(index + 1, 0, copy);
+    this.render();
+  },
+
   removeCue(index) {
     if (this.cues[index]?.id === this.activeId) this.activeId = null;
     this.cues.splice(index, 1);
@@ -64,12 +72,19 @@ export const store = {
       goBtn.textContent = 'Go';
       goBtn.onclick = () => this.onTrigger && this.onTrigger(i);
 
+      const dupBtn = document.createElement('button');
+      dupBtn.textContent = 'Dup';
+      dupBtn.title = 'Duplicate Cue';
+      dupBtn.style.marginLeft = '4px';
+      dupBtn.onclick = () => this.duplicateCue(i);
+
       const delBtn = document.createElement('button');
       delBtn.className = 'btn-danger';
       delBtn.textContent = 'X';
       delBtn.onclick = () => this.removeCue(i);
 
       actions.appendChild(goBtn);
+      actions.appendChild(dupBtn);
       actions.appendChild(delBtn);
       div.appendChild(label);
       div.appendChild(actions);
@@ -97,7 +112,7 @@ export const store = {
     const fileInput = document.getElementById('load-file');
     document.getElementById('btn-load').onclick = () => fileInput.click();
     fileInput.onchange = (e) => {
-      const file = e.target.files[0];
+      const file = e.target.files;
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
