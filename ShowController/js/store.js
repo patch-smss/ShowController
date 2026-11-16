@@ -1,5 +1,7 @@
 export const channel = new BroadcastChannel('show_controller_bus');
 
+let dragSrcIndex = null;
+
 export const store = {
   cues: [],
   activeId: null,
@@ -21,7 +23,7 @@ export const store = {
     const orig = this.cues[index];
     if (!orig) return;
     const copy = { ...orig, id: crypto.randomUUID() };
-    this.cues.splice(index + 1, 0, copy);
+    this.cues.push(copy);
     this.render();
   },
 
@@ -53,7 +55,14 @@ export const store = {
     document.getElementById('now-title').textContent = this.cues[activeIdx] ? this.cues[activeIdx].name : '—';
     document.getElementById('next-title').textContent = this.cues[activeIdx + 1] ? this.cues[activeIdx + 1].name : 'End of Show';
 
-    let dragSrcIndex = null;
+    // Allow dropping into the empty space below cues to move an item to the end
+    list.ondragover = (e) => e.preventDefault();
+    list.ondrop = (e) => {
+      if (e.target === list && dragSrcIndex !== null) {
+        this.moveCue(dragSrcIndex, this.cues.length - 1);
+        dragSrcIndex = null;
+      }
+    };
 
     this.cues.forEach((cue, i) => {
       const div = document.createElement('div');
@@ -81,7 +90,7 @@ export const store = {
       if (cue.kind === 'youtube' || cue.kind === 'canva') {
         const preBtn = document.createElement('button');
         preBtn.textContent = 'Pre-load';
-        preBtn.title = 'Open underneath Projector now so you can skip ads & queue it up';
+        preBtn.title = 'Open tab now so you can skip ads & queue it up';
         preBtn.style.background = '#6d28d9';
         preBtn.style.marginLeft = '4px';
         preBtn.onclick = () => this.onPreload && this.onPreload(i);
@@ -90,7 +99,7 @@ export const store = {
 
       const dupBtn = document.createElement('button');
       dupBtn.textContent = 'Dup';
-      dupBtn.title = 'Duplicate Cue';
+      dupBtn.title = 'Duplicate Cue to End of List';
       dupBtn.style.marginLeft = '4px';
       dupBtn.onclick = () => this.duplicateCue(i);
 
@@ -99,7 +108,6 @@ export const store = {
       delBtn.textContent = 'X';
       delBtn.onclick = () => this.removeCue(i);
 
-//      actions.appendChild(goBtn);
       actions.appendChild(dupBtn);
       actions.appendChild(delBtn);
       div.appendChild(label);
@@ -107,7 +115,8 @@ export const store = {
 
       div.ondragstart = () => { dragSrcIndex = i; };
       div.ondragover = (e) => e.preventDefault();
-      div.ondrop = () => {
+      div.ondrop = (e) => {
+        e.stopPropagation();
         this.moveCue(dragSrcIndex, i);
         dragSrcIndex = null;
       };
@@ -117,18 +126,84 @@ export const store = {
   },
 
   initPersistence() {
-    document.getElementById('btn-save').onclick = () => {
-      const blob = new Blob([JSON.stringify(this.cues, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'MyShow.json';
-      a.click();
+    document.getElementById('btn-save').onclick = async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const defaultName = `Show_${today}.json`;
+      let fileHandle = null;
+      let chosenFileName = defaultName;
+
+      if (window.showSaveFilePicker) {
+        try {
+          fileHandle = await window.showSaveFilePicker({
+            suggestedName: defaultName,
+            types: [{
+              description: 'Show Cue List (*.json)',
+              accept: { 'application/json': ['.json'] }
+            }]
+          });
+          chosenFileName = fileHandle.name;
+        } catch (err) {
+          if (err.name === 'AbortError') return;
+        }
+      } else {
+        const promptName = prompt('Enter show file name:', defaultName);
+        if (!promptName) return;
+        chosenFileName = promptName.endsWith('.json') ? promptName : `${promptName}.json`;
+      }
+
+      const folderName = chosenFileName.replace(/\.json$/i, '').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      const cleanCues = [];
+      for (const cue of this.cues) {
+        if (cue.fileObj && ['image', 'audio', 'video', 'pdf'].includes(cue.kind)) {
+          const relTarget = `${folderName}/${cue.fileObj.name}`;
+          await fetch('/api/upload-media', {
+            method: 'POST',
+            headers: { 'X-Filename': encodeURIComponent(relTarget) },
+            body: cue.fileObj
+          });
+          const { fileObj, ...rest } = cue;
+          cleanCues.push({ ...rest, src: relTarget });
+        } else if (cue.kind === 'ppt') {
+          const baseName = cue.src.split('/').pop();
+          const relTarget = `${folderName}/${baseName}`;
+          try {
+            const pptRes = await fetch('/Media/' + encodeURIComponent(baseName));
+            if (pptRes.ok) {
+              const pptBlob = await pptRes.blob();
+              await fetch('/api/upload-media', {
+                method: 'POST',
+                headers: { 'X-Filename': encodeURIComponent(relTarget) },
+                body: pptBlob
+              });
+            }
+          } catch {}
+          const { fileObj, tempPpt, ...rest } = cue;
+          cleanCues.push({ ...rest, src: relTarget });
+        } else {
+          const { fileObj, tempPpt, ...rest } = cue;
+          cleanCues.push(rest);
+        }
+      }
+
+      const jsonStr = JSON.stringify(cleanCues, null, 2);
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        await writable.write(jsonStr);
+        await writable.close();
+      } else {
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = chosenFileName;
+        a.click();
+      }
     };
 
     const fileInput = document.getElementById('load-file');
     document.getElementById('btn-load').onclick = () => fileInput.click();
     fileInput.onchange = (e) => {
-      const file = e.target.files[0];
+      const file = e.target.files.item(0);
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
@@ -137,6 +212,7 @@ export const store = {
           if (Array.isArray(parsed)) {
             this.cues = parsed;
             this.activeId = null;
+            this.isAtEnd = false;
             this.render();
           }
         } catch {
@@ -144,6 +220,19 @@ export const store = {
         }
       };
       reader.readAsText(file);
+      fileInput.value = '';
     };
+
+    const clearBtn = document.getElementById('btn-clear');
+    if (clearBtn) {
+      clearBtn.onclick = () => {
+        if (this.cues.length === 0) return;
+        if (!confirm('Clear all cues from the list?')) return;
+        this.cues = [];
+        this.activeId = null;
+        this.isAtEnd = false;
+        this.render();
+      };
+    }
   }
 };

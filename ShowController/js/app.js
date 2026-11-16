@@ -4,11 +4,11 @@ import { initMediaModule } from '/js/media.js';
 let stageMod = null;
 let pptMod = null;
 let projectorWin = null;
+const webTabs = new Map();
 
 export function closeWebWindow() {
   channel.postMessage({ type: 'FOCUS_PROJECTOR_TAB' });
 }
-
 
 function buildDirectUrl(cue) {
   if (cue.kind === 'youtube') {
@@ -40,24 +40,21 @@ async function ensureProjectorOpen() {
   }
 }
 
-const preloadedIds = new Set();
-
-export async function preloadWebCue(index) {
+export function preloadWebCue(index) {
   const cue = store.cues[index];
   if (!cue || (cue.kind !== 'youtube' && cue.kind !== 'canva')) return;
-  await ensureProjectorOpen();
 
-  // Mark as pre-loaded and open ONCE in standard Edge window
-  preloadedIds.add(cue.id);
-  window.open(buildDirectUrl(cue), '_blank');
+  // Open synchronously inside the click gesture so Edge never blocks Canva/YouTube
+  const tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
+  if (tab) webTabs.set(cue.id, tab);
 
-  setTimeout(() => {
-    if (projectorWin && !projectorWin.closed) projectorWin.focus();
-  }, 400);
+  // Ensure projector is open and return focus to it without blocking the popup gesture
+  ensureProjectorOpen().then(() => {
+    setTimeout(() => {
+      if (projectorWin && !projectorWin.closed) projectorWin.focus();
+    }, 300);
+  });
 }
-
-
-
 
 export async function triggerCue(index) {
   if (index < 0 || index >= store.cues.length) return;
@@ -66,7 +63,6 @@ export async function triggerCue(index) {
 
   if (stageMod) stageMod.setIntermission(false);
 
-  // PowerPoint Cue
   if (cue.kind === 'ppt') {
     if (stageMod) stageMod.setBlackout(true);
     channel.postMessage({ type: 'CUE', cue });
@@ -75,22 +71,21 @@ export async function triggerCue(index) {
   }
 
   if (pptMod) pptMod.sendPptCommand('kill_ppt');
-  await ensureProjectorOpen();
 
-  // YouTube or Canva Cue -> Never opens a duplicate tab if already pre-loaded!
   if (cue.kind === 'youtube' || cue.kind === 'canva') {
-    if (preloadedIds.has(cue.id)) {
-      // Bring the existing Edge window with your pre-loaded tab to the front via Windows OS!
-      fetch('/api/focus-browser').catch(() => {});
+    let tab = webTabs.get(cue.id);
+    if (tab && !tab.closed) {
+      tab.focus();
     } else {
-      preloadedIds.add(cue.id);
-      window.open(buildDirectUrl(cue), '_blank');
+      tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
+      if (tab) webTabs.set(cue.id, tab);
     }
     return;
   }
 
-  // Local Image, Video, or Audio Cue -> Switches back to Tab 1 (Projector Output)
-  if (stageMod && (cue.kind === 'image' || cue.kind === 'video')) {
+  await ensureProjectorOpen();
+
+  if (stageMod && ['image', 'video', 'pdf'].includes(cue.kind)) {
     stageMod.setBlackout(false);
   }
 
@@ -144,15 +139,30 @@ export async function openProjector() {
     const res = await fetch('/api/screens');
     s = await res.json();
   } catch {}
-  // Standard window features (keeps browser tab bar enabled on Monitor 2!)
   const features = `left=${s.x},top=${s.y},width=${s.w},height=${s.h}`;
   projectorWin = window.open('/projector.html', 'StageProjector', features);
 }
 
-export function endShow() {
+export async function endShow() {
   if (!confirm('End show, close all windows, and restore mirrored display?')) return;
-  closeWebWindow();
   if (pptMod) pptMod.sendPptCommand('kill_ppt');
+
+  webTabs.forEach(tab => {
+    try { if (tab && !tab.closed) tab.close(); } catch {}
+  });
+  webTabs.clear();
+
+  const tempPpts = store.cues.filter(c => c.kind === 'ppt' && c.tempPpt).map(c => c.src);
+  if (tempPpts.length > 0) {
+    try {
+      await fetch('/api/cleanup-temp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: tempPpts })
+      });
+    } catch {}
+  }
+
   channel.postMessage({ type: 'SHUTDOWN' });
   fetch('/api/shutdown').catch(() => {});
 }
@@ -168,7 +178,7 @@ document.getElementById('btn-prev').onclick = prevCue;
 document.getElementById('btn-open-proj').onclick = openProjector;
 document.getElementById('btn-end-show').onclick = endShow;
 
-// 2. Load Phase 2 & 3 Modules Safely
+// 2. Load Phase 2, 3 & 4 Modules Safely
 (async () => {
   try {
     stageMod = await import('/js/stage.js');
@@ -185,14 +195,23 @@ document.getElementById('btn-end-show').onclick = endShow;
     pptMod = await import('/js/ppt.js');
     pptMod.initPptModule();
   } catch (err) { console.error('PPT module error:', err); }
-})();
 
-// 3. Media End Listener
-channel.addEventListener('message', (e) => {
-  if (e.data?.type === 'MEDIA_ENDED') {
-    document.getElementById('now-title').textContent = '— (Finished)';
-  }
-});
+  try {
+    const remoteMod = await import('/js/remote.js');
+    remoteMod.initRemoteModule({
+      triggerCue,
+      nextCue,
+      prevCue,
+      closeWebWindow,
+      openProjector,
+      toggleBlackout: () => stageMod && stageMod.toggleBlackout(),
+      toggleIntermission: () => stageMod && stageMod.toggleIntermission(),
+      stopAudioNow: () => stageMod && stageMod.stopAudioNow(),
+      triggerPanic: () => { if (pptMod) pptMod.sendPptCommand('kill_ppt'); if (stageMod) stageMod.triggerPanic(); },
+      toggleFreeze: () => pptMod && pptMod.toggleFreeze()
+    });
+  } catch (err) { console.error('Remote module error:', err); }
+})();
 
 // Keyboard shortcuts
 window.addEventListener('keydown', (e) => {
@@ -212,7 +231,12 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Auto-close if Stop_Show.bat stops the server externally
+channel.addEventListener('message', (e) => {
+  if (e.data?.type === 'MEDIA_ENDED') {
+    document.getElementById('now-title').textContent = '— (Finished)';
+  }
+});
+
 setInterval(async () => {
   try {
     const res = await fetch('/api/screens');

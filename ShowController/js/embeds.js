@@ -7,9 +7,9 @@ export function initEmbedsModule() {
   slot.innerHTML = `
     <div class="toolbar-row" style="flex-wrap:wrap;">
       <input type="text" id="url-input" placeholder="Paste YouTube or Canva link..." />
-      <input type="number" id="yt-start" placeholder="Start(s)" min="0" style="width:74px;" title="Start Seconds" />
-      <input type="number" id="yt-end" placeholder="End(s)" min="0" style="width:74px;" title="End Seconds" />
-      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#cbd5e1;">
+      <input type="number" id="yt-start" placeholder="Start(s)" min="0" style="display:none; width:74px;" title="Start Seconds" />
+      <input type="number" id="yt-end" placeholder="End(s)" min="0" style="display:none; width:74px;" title="End Seconds" />
+      <label style="display:none; align-items:center; gap:4px; font-size:12px; color:#cbd5e1;">
         <input type="checkbox" id="yt-loop"> Loop
       </label>
       <button id="btn-add-url">+ Add Link</button>

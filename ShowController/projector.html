@@ -215,7 +215,7 @@
 
       if (cue.kind === 'audio') {
         stopCurrentAudio(msg.fadeOut);
-        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + encodeURIComponent(cue.src);
+        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
         const audio = document.createElement('audio');
         audio.src = mediaUrl;
         audio.volume = msg.fadeIn ? 0 : 1;
@@ -237,19 +237,25 @@
       clearVisual();
 
       if (cue.kind === 'image') {
-        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + encodeURIComponent(cue.src);
+        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
         const img = document.createElement('img');
         img.src = mediaUrl;
         stage.appendChild(img);
         activeVisual = img;
       } else if (cue.kind === 'video') {
-        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + encodeURIComponent(cue.src);
+        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
         const video = document.createElement('video');
         video.src = mediaUrl;
         video.onended = () => channel.postMessage({ type: 'MEDIA_ENDED' });
         stage.appendChild(video);
         video.play().catch(() => console.warn('Click Go Fullscreen on projector to unlock video autoplay.'));
         activeVisual = video;
+      } else if (cue.kind === 'pdf') {
+        const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
+        const iframe = document.createElement('iframe');
+        iframe.src = mediaUrl + '#toolbar=0&navpanes=0&view=Fit';
+        stage.appendChild(iframe);
+        activeVisual = iframe;
       }
     }
   };

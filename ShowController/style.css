@@ -98,16 +98,21 @@ button {
 button:hover { filter: brightness(1.15); }
 #cue-list {
   flex: 1;
+  min-height: 220px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 8px 8px 64px 8px;
+  background: #13161c;
+  border: 1px dashed #2d3340;
+  border-radius: 8px;
 }
 .cue-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 11px;
+  padding: 11px 12px;
   background: #242832;
   border-radius: 6px;
   border-left: 4px solid transparent;

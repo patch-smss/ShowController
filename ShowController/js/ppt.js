@@ -42,12 +42,22 @@ export function initPptModule() {
     pptInput.style.display = 'none';
 
     pptBtn.onclick = () => pptInput.click();
-    pptInput.onchange = () => {
+        pptInput.onchange = async () => {
       for (const file of pptInput.files) {
-        store.addCue(file.name, 'ppt', file.name);
+        const res = await fetch('/api/upload-media', {
+          method: 'POST',
+          headers: { 'X-Filename': encodeURIComponent(file.name) },
+          body: file
+        });
+        if (res.ok) {
+          store.addCue(file.name, 'ppt', file.name, { tempPpt: true });
+        } else {
+          alert('Failed to copy PowerPoint file to Media folder.');
+        }
       }
       pptInput.value = '';
     };
+
 
     picker.parentElement.appendChild(pptBtn);
     picker.parentElement.appendChild(pptInput);
