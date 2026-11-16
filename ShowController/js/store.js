@@ -1,7 +1,11 @@
+export const channel = new BroadcastChannel('show_controller_bus');
+
 export const store = {
   cues: [],
   activeId: null,
+  isAtEnd: false,
   onTrigger: null,
+  onPreload: null,
 
   getActiveIndex() {
     if (!this.activeId) return -1;
@@ -36,6 +40,7 @@ export const store = {
 
   setActive(id) {
     this.activeId = id;
+    this.isAtEnd = false;
     this.render();
   },
 
@@ -71,6 +76,17 @@ export const store = {
       const goBtn = document.createElement('button');
       goBtn.textContent = 'Go';
       goBtn.onclick = () => this.onTrigger && this.onTrigger(i);
+      actions.appendChild(goBtn);
+
+      if (cue.kind === 'youtube' || cue.kind === 'canva') {
+        const preBtn = document.createElement('button');
+        preBtn.textContent = 'Pre-load';
+        preBtn.title = 'Open underneath Projector now so you can skip ads & queue it up';
+        preBtn.style.background = '#6d28d9';
+        preBtn.style.marginLeft = '4px';
+        preBtn.onclick = () => this.onPreload && this.onPreload(i);
+        actions.appendChild(preBtn);
+      }
 
       const dupBtn = document.createElement('button');
       dupBtn.textContent = 'Dup';
@@ -83,7 +99,7 @@ export const store = {
       delBtn.textContent = 'X';
       delBtn.onclick = () => this.removeCue(i);
 
-      actions.appendChild(goBtn);
+//      actions.appendChild(goBtn);
       actions.appendChild(dupBtn);
       actions.appendChild(delBtn);
       div.appendChild(label);
@@ -112,7 +128,7 @@ export const store = {
     const fileInput = document.getElementById('load-file');
     document.getElementById('btn-load').onclick = () => fileInput.click();
     fileInput.onchange = (e) => {
-      const file = e.target.files;
+      const file = e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {

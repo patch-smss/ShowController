@@ -1,7 +1,12 @@
-import { channel } from '/js/app.js';
+import { channel } from '/js/store.js';
 
 let isBlackout = true;
 let isIntermission = false;
+let onCloseWebWin = null;
+
+export function setCloseWebHandler(fn) {
+  onCloseWebWin = fn;
+}
 
 export function getAudioPrefs() {
   const fadeInEl = document.getElementById('chk-fade-in');
@@ -72,6 +77,10 @@ export function initStageModule() {
       <button id="btn-intermission" class="btn-inter">INTERMISSION (I)</button>
     </div>
 
+    <button id="btn-close-web" style="background:#475569; font-size:12px;">
+      Back to Projector Tab (W)
+    </button>
+
     <button id="btn-set-intermission" style="background:#334155; font-size:12px;">
       Set Intermission / Backdrop Image...
     </button>
@@ -98,13 +107,14 @@ export function initStageModule() {
 
   document.getElementById('btn-blackout').onclick = toggleBlackout;
   document.getElementById('btn-intermission').onclick = toggleIntermission;
+  document.getElementById('btn-close-web').onclick = () => onCloseWebWin && onCloseWebWin();
   document.getElementById('btn-stop-audio').onclick = stopAudioNow;
   document.getElementById('btn-panic').onclick = triggerPanic;
 
   const interPicker = document.getElementById('intermission-picker');
   document.getElementById('btn-set-intermission').onclick = () => interPicker.click();
   interPicker.onchange = () => {
-    const file = interPicker.files[0];
+    const file = interPicker.files.item(0);
     if (!file) return;
     const blobUrl = URL.createObjectURL(file);
     channel.postMessage({ type: 'SET_INTERMISSION_IMG', url: blobUrl });
@@ -116,5 +126,6 @@ export function initStageModule() {
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     if (e.key.toLowerCase() === 'b' || e.key === '.') toggleBlackout();
     if (e.key.toLowerCase() === 'i') toggleIntermission();
+    if (e.key.toLowerCase() === 'w' && onCloseWebWin) onCloseWebWin();
   });
 }

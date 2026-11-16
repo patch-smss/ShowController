@@ -56,6 +56,21 @@ while ($listener.IsListening) {
             continue
         }
 
+        # API: Bring Standard Edge Browser Window (Pre-loaded YouTube/Canva Tabs) to Front
+        if ($rawPath -eq "/api/focus-browser") {
+            $wshell = New-Object -ComObject WScript.Shell
+            $edgeProcs = Get-Process msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" -and $_.MainWindowTitle -notmatch "Show Control|Projector Output" }
+            foreach ($p in $edgeProcs) {
+                $wshell.AppActivate($p.Id) | Out-Null
+            }
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"ok":true}')
+            $res.ContentType = "application/json"
+            $res.OutputStream.Write($bytes, 0, $bytes.Length)
+            $res.Close()
+            continue
+        }
+
+
         # API: Graceful Shutdown, Restore Display & Close Show Edge Instance
         if ($rawPath -eq "/api/shutdown") {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"status":"stopping"}')
@@ -71,6 +86,37 @@ while ($listener.IsListening) {
             } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
             break
+        }
+
+                # API: Launch or Kill Native PowerPoint Slideshow (/S)
+        if ($rawPath -eq "/api/ppt" -and $req.HttpMethod -eq "POST") {
+            $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
+            $body = $reader.ReadToEnd() | ConvertFrom-Json
+            $status = '{"status":"ok"}'
+
+            if ($body.action -eq "launch_ppt") {
+                Get-Process powerpnt -ErrorAction SilentlyContinue | Stop-Process -Force
+                Start-Sleep -Milliseconds 250
+                $safeName = [System.IO.Path]::GetFileName($body.file)
+                $fullPath = Join-Path $mediaDir $safeName
+
+                if ((Test-Path $fullPath) -and ($safeName -like "*.ppt*")) {
+                    Start-Process "powerpnt.exe" -ArgumentList "/S `"$fullPath`""
+                    $status = '{"status":"launched"}'
+                } else {
+                    $res.StatusCode = 404
+                    $status = '{"error":"Place your .pptx file inside the ShowController\\Media folder first."}'
+                }
+            } elseif ($body.action -eq "kill_ppt") {
+                Get-Process powerpnt -ErrorAction SilentlyContinue | Stop-Process -Force
+                $status = '{"status":"closed"}'
+            }
+
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($status)
+            $res.ContentType = "application/json; charset=utf-8"
+            $res.OutputStream.Write($bytes, 0, $bytes.Length)
+            $res.Close()
+            continue
         }
 
         # API: List files on Desktop
