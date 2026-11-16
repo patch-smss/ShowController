@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Projector Output</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body, html { width: 100vw; height: 100vh; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  body.fullscreen { cursor: none; }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #000; }
+  #stage img, #stage video { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #fs-btn { position: fixed; top: 20px; right: 20px; z-index: 200; background: rgba(30, 41, 59, 0.9); color: #fff; border: 1px solid #475569; padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  body.fullscreen #fs-btn { display: none; }
+</style>
+</head>
+<body>
+  <button id="fs-btn" onclick="enterFullscreen()">⛶ Go Fullscreen (F11)</button>
+  <div id="stage"></div>
+
+<script>
+  const channel = new BroadcastChannel('show_controller_bus');
+  const stage = document.getElementById('stage');
+  let activeVisual = null;
+  let activeAudio = null;
+
+  function enterFullscreen() {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    document.body.classList.toggle('fullscreen', !!document.fullscreenElement);
+  });
+
+  function clearVisual() {
+    if (activeVisual && activeVisual.tagName === 'VIDEO') {
+      activeVisual.pause();
+    }
+    stage.innerHTML = '';
+    activeVisual = null;
+  }
+
+  function clearAudio() {
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio.remove();
+      activeAudio = null;
+    }
+  }
+
+  channel.onmessage = (e) => {
+    const msg = e.data;
+    if (!msg) return;
+
+    if (msg.type === 'SHUTDOWN') {
+      window.close();
+      return;
+    }
+
+    if (msg.type === 'CUE') {
+      const cue = msg.cue;
+      const mediaUrl = cue.src.startsWith('blob:') ? cue.src : '/Media/' + encodeURIComponent(cue.src);
+
+      if (cue.kind === 'image') {
+        clearVisual();
+        const img = document.createElement('img');
+        img.src = mediaUrl;
+        stage.appendChild(img);
+        activeVisual = img;
+      } else if (cue.kind === 'video') {
+        clearVisual();
+        const video = document.createElement('video');
+        video.src = mediaUrl;
+        video.onended = () => channel.postMessage({ type: 'MEDIA_ENDED' });
+        stage.appendChild(video);
+        video.play().catch(() => console.warn('Click Go Fullscreen on projector to unlock video autoplay.'));
+        activeVisual = video;
+      } else if (cue.kind === 'audio') {
+        // Audio runs independently without clearing the active image or video!
+        clearAudio();
+        const audio = document.createElement('audio');
+        audio.src = mediaUrl;
+        audio.onended = () => {
+          if (activeAudio === audio) activeAudio = null;
+          audio.remove();
+          channel.postMessage({ type: 'MEDIA_ENDED' });
+        };
+        document.body.appendChild(audio);
+        audio.play().catch(() => console.warn('Click Go Fullscreen on projector to unlock audio.'));
+        activeAudio = audio;
+      }
+    }
+  };
+</script>
+</body>
+</html>

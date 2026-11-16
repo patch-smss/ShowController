@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Show Control Deck</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Left Panel: Cue List & Media Inputs -->
+  <div class="panel">
+    <h2>
+      <span>Master Cue List</span>
+      <span>
+        <button id="btn-save">Save Show</button>
+        <button id="btn-load">Load Show</button>
+        <input type="file" id="load-file" accept=".json" style="display:none" />
+      </span>
+    </h2>
+
+    <div class="preview-strip">
+      <div class="preview-card"><span>Now Live</span><strong id="now-title">—</strong></div>
+      <div class="preview-card"><span>Next Up</span><strong id="next-title" style="color:#a3e635">—</strong></div>
+    </div>
+
+    <div id="dropzone">Drag & drop any Image, Audio, or Video file from anywhere on your PC</div>
+
+    <div class="toolbar-row">
+      <button id="btn-browse-files" style="background:#0284c7; flex:1;">+ Browse Files from PC / USB</button>
+      <input type="file" id="file-picker" multiple accept="image/*,audio/*,video/*" style="display:none" />
+    </div>
+
+    <!-- Future Slot: Phase 3 Embeds (YouTube / Canva) -->
+    <div id="slot-embeds" class="slot-container"></div>
+
+    <div id="cue-list"></div>
+  </div>
+
+  <!-- Right Panel: Stage Controls -->
+  <div class="panel">
+    <h2>Stage Controls</h2>
+    <div class="controls">
+      <button id="btn-next" class="btn-go">NEXT CUE (Space / Right)</button>
+      <button id="btn-prev">PREVIOUS CUE (Left)</button>
+      <button id="btn-open-proj" class="btn-proj">Open / Focus Projector</button>
+
+      <!-- Future Slot: Phase 2 Stage Overlays & Audio Fades -->
+      <div id="slot-stage" class="slot-container"></div>
+
+      <!-- Future Slot: Phase 4 Wi-Fi Phone Remote -->
+      <div id="slot-remote" class="slot-container"></div>
+
+      <button id="btn-end-show" class="btn-danger" style="margin-top:auto; padding:12px;">
+        End Show & Exit
+      </button>
+    </div>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
