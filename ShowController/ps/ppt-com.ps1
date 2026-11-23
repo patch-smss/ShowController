@@ -42,14 +42,31 @@ function Start-StageSlideShow($pres) {
         $pres.SlideShowSettings.ShowWithNarration = -1
         $pres.SlideShowSettings.ShowWithAnimation = -1
         $ssWin = $pres.SlideShowSettings.Run()
-    } else {
-        $ssWin = $app.SlideShowWindows.Item(1)
-    }
+    } else { $ssWin = $app.SlideShowWindows.Item(1) }
     if ($sec -and $ssWin) {
         $ssWin.Left = [float]($sec.Bounds.X * 0.75); $ssWin.Top = [float]($sec.Bounds.Y * 0.75)
         $ssWin.Width = [float]($sec.Bounds.Width * 0.75); $ssWin.Height = [float]($sec.Bounds.Height * 0.75)
     }
     return $ssWin
+}
+
+function Insert-MediaSlide($pres, $fullPath, $kind) {
+    $idx = $pres.Slides.Count + 1
+    $sl = $pres.Slides.Add($idx, 12) # ppLayoutBlank
+    $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
+    $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
+    if ($kind -eq "image") {
+        $shp = $sl.Shapes.AddPicture($fullPath, 0, -1, 0, 0)
+        $shp.LockAspectRatio = -1
+        $scale = [Math]::Min($sw / $shp.Width, $sh / $shp.Height)
+        $shp.Width = $shp.Width * $scale
+        $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
+    } elseif ($kind -eq "video") {
+        $shp = $sl.Shapes.AddMediaObject2($fullPath, 0, -1, 0, 0, $sw, $sh)
+        $shp.AnimationSettings.PlaySettings.PlayOnEntry = -1
+        $shp.AnimationSettings.PlaySettings.HideWhileNotPlaying = -1
+    }
+    return $idx
 }
 
 function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
@@ -62,20 +79,39 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
         return $true
     }
 
+    if ($rawPath -eq "/api/ppt/insert" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir
+            $rel = $body.file.Replace('/', '\').TrimStart('\')
+            $full = Join-Path $mediaDir $rel
+            if ($rel.Contains("..") -or -not (Test-Path $full)) { throw "File not found: $rel" }
+            $startIdx = $pres.Slides.Count + 1
+            if ($body.kind -eq "ppt") {
+                $added = $pres.Slides.InsertFromFile($full, $pres.Slides.Count, 1, -1)
+                $endIdx = $startIdx + $added - 1
+            } else {
+                $endIdx = Insert-MediaSlide $pres $full $body.kind
+            }
+            Send-Json $res @{ ok = $true; startSlide = $startIdx; endSlide = $endIdx; total = $pres.Slides.Count }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
     if ($rawPath -eq "/api/ppt/sync") {
         try {
-            $app = Get-PptApp
-            $pres = Ensure-MasterPresentation $mediaDir
-            $list = @()
+            $app = Get-PptApp; $pres = Ensure-MasterPresentation $mediaDir; $list = @()
             for ($i = 1; $i -le $pres.Slides.Count; $i++) {
                 $sl = $pres.Slides.Item($i)
                 $title = if ($i -eq 1) { "Stage Blackout (Slide 1)" } elseif ($sl.Shapes.HasTitle -eq -1) { $sl.Shapes.Title.TextFrame.TextRange.Text } else { "Slide $i" }
                 $list += @{ index = $i; title = $title.Trim(); hidden = ($sl.SlideShowTransition.Hidden -eq -1) }
             }
             $hasWin = ($app.SlideShowWindows.Count -gt 0)
-            $pos = if ($hasWin) { $app.SlideShowWindows.Item(1).View.CurrentShowPosition } else { 0 }
-            $st  = if ($hasWin) { [int]$app.SlideShowWindows.Item(1).View.State } else { 0 }
-            Send-Json $res @{ ok = $true; current = $pos; state = $st; frozen = ($script:frozenTempSlide -gt 0); slides = $list }
+            Send-Json $res @{
+                ok = $true; frozen = ($script:frozenTempSlide -gt 0); slides = $list
+                current = if ($hasWin) { $app.SlideShowWindows.Item(1).View.CurrentShowPosition } else { 0 }
+                state = if ($hasWin) { [int]$app.SlideShowWindows.Item(1).View.State } else { 0 }
+            }
         } catch { Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
     }
@@ -83,9 +119,7 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/nav" -and $req.HttpMethod -eq "POST") {
         try {
             $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
-            $pres = Ensure-MasterPresentation $mediaDir
-            $ssWin = Start-StageSlideShow $pres
-            $view = $ssWin.View
+            $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres; $view = $ssWin.View
             switch ($body.action) {
                 "next"     { $view.State = 1; $view.Next() }
                 "prev"     { $view.State = 1; $view.Previous() }
@@ -93,15 +127,11 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
                 "blackout" { $view.State = if ($body.active) { 3 } else { 1 } }
                 "freeze"   {
                     if ($body.active -and $script:frozenTempSlide -eq 0) {
-                        $cur = $view.CurrentShowPosition
-                        $dup = $pres.Slides.Item($cur).Duplicate()
-                        $script:frozenTempSlide = $dup.SlideIndex
-                        $view.GotoSlide($script:frozenTempSlide)
+                        $dup = $pres.Slides.Item($view.CurrentShowPosition).Duplicate()
+                        $script:frozenTempSlide = $dup.SlideIndex; $view.GotoSlide($script:frozenTempSlide)
                     } elseif (-not $body.active -and $script:frozenTempSlide -gt 0) {
-                        $target = [Math]::Max(1, $script:frozenTempSlide - 1)
-                        $view.GotoSlide($target)
-                        $pres.Slides.Item($script:frozenTempSlide).Delete()
-                        $script:frozenTempSlide = 0
+                        $view.GotoSlide([Math]::Max(1, $script:frozenTempSlide - 1))
+                        $pres.Slides.Item($script:frozenTempSlide).Delete(); $script:frozenTempSlide = 0
                     }
                 }
             }

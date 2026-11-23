@@ -1,4 +1,4 @@
-import { detectMediaKind } from '/js/media.js';
+import { ingestMediaFile } from '/js/media.js';
 
 export function init(container, ctx) {
   const btn = document.createElement('button');
@@ -8,15 +8,12 @@ export function init(container, ctx) {
   const picker = document.createElement('input');
   picker.type = 'file';
   picker.multiple = true;
-  picker.accept = 'image/*,audio/*,video/*,.pdf';
+  picker.accept = 'image/*,audio/*,video/*';
   picker.style.display = 'none';
 
   btn.onclick = () => picker.click();
-  picker.onchange = () => {
-    for (const file of picker.files) {
-      const kind = detectMediaKind(file.name);
-      if (kind) ctx.store.addCue(file.name, kind, URL.createObjectURL(file));
-    }
+  picker.onchange = async () => {
+    for (const file of picker.files) await ingestMediaFile(file, ctx.store);
     picker.value = '';
   };
 
