@@ -50,6 +50,7 @@ while ($listener.IsListening) {
     try {
         $context = $listener.GetContext()
         $req = $context.Request; $res = $context.Response
+        $res.Headers.Add("Cache-Control", "no-store")
         $rawPath = [System.Uri]::UnescapeDataString($req.Url.AbsolutePath)
 
         if ($rawPath -eq "/api/shutdown") {
@@ -67,18 +68,20 @@ while ($listener.IsListening) {
             $manifest = @{}
             foreach ($z in $zones) {
                 $zPath = Join-Path $pluginsRoot $z
-                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)" })
+                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)?v=$($_.LastWriteTimeUtc.Ticks)" })
                 $manifest[$z] = $files
             }
             Send-Json $res $manifest
             continue
         }
 
-        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
-        if (Get-Command Handle-HotkeysApi -ErrorAction SilentlyContinue) { if (Handle-HotkeysApi $rawPath $req $res) { continue } }
-        if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
-        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
-        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue)   { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-HotkeysApi -ErrorAction SilentlyContinue)   { if (Handle-HotkeysApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-PptCoreApi -ErrorAction SilentlyContinue)   { if (Handle-PptCoreApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-PptSlidesApi -ErrorAction SilentlyContinue) { if (Handle-PptSlidesApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-PptNavApi -ErrorAction SilentlyContinue)    { if (Handle-PptNavApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)     { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)    { if (Handle-RemoteApi $rawPath $req $res) { continue } }
 
         if ($rawPath -eq "/") { $rawPath = "/control.html" }
         $rel = $rawPath.TrimStart('/').Replace('/', '\')

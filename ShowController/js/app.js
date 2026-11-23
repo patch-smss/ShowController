@@ -67,20 +67,34 @@ export async function triggerCue(index) {
 }
 
 export function nextCue() {
-  if (store.isAtEnd) return;
+  if (store.cues.length === 0) return;
+  if (store.isAtEnd) {
+    store.isAtEnd = false;
+    triggerCue(0);
+    return;
+  }
   const idx = store.getActiveIndex();
   if (idx + 1 < store.cues.length) {
     triggerCue(idx + 1);
-  } else if (store.cues.length > 0) {
+  } else {
     store.isAtEnd = true;
     ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction });
   }
 }
 
 export function prevCue() {
+  if (store.cues.length === 0) return;
   const idx = store.getActiveIndex();
-  if (store.isAtEnd && idx >= 0) return triggerCue(idx);
-  if (idx - 1 >= 0) triggerCue(idx - 1);
+  if (store.isAtEnd && idx >= 0) {
+    store.isAtEnd = false;
+    triggerCue(idx);
+    return;
+  }
+  if (idx <= 0) {
+    triggerCue(store.cues.length - 1);
+    return;
+  }
+  triggerCue(idx - 1);
 }
 
 export async function openProjector() {
@@ -92,9 +106,7 @@ export async function endShow() {
   if (confirm('Save a copy of the Master PowerPoint presentation (.pptx) before closing?')) {
     const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
     const name = prompt('Enter filename for Master PPTX (saved in Media folder):', defaultName);
-    if (name) {
-      await pptPost('/api/ppt/save', { name });
-    }
+    if (name) await pptPost('/api/ppt/save', { name });
   }
   stopAudio(false);
   ctx.emit('END_SHOW');

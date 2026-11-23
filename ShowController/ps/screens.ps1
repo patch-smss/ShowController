@@ -13,19 +13,17 @@ function Arrange-Monitor1Windows {
     $wa = $pri.WorkingArea
     $halfW = [int]($wa.Width / 2)
 
-    # 1. Snap Control Deck (Edge App) to Left 50% of Monitor 1
     Get-Process msedge -ErrorAction SilentlyContinue | Where-Object {
         $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*Show Control Deck*"
     } | ForEach-Object {
-        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null # SW_RESTORE
+        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null
         [Win32Window]::MoveWindow($_.MainWindowHandle, $wa.X, $wa.Y, $halfW, $wa.Height, $true) | Out-Null
     }
 
-    # 2. Snap PowerPoint Editor to Right 50% of Monitor 1
     Get-Process POWERPNT -ErrorAction SilentlyContinue | Where-Object {
         $_.MainWindowHandle -ne 0
     } | ForEach-Object {
-        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null # SW_RESTORE
+        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null
         [Win32Window]::MoveWindow($_.MainWindowHandle, $wa.X + $halfW, $wa.Y, $halfW, $wa.Height, $true) | Out-Null
     }
 }
@@ -38,6 +36,16 @@ function Handle-ScreensApi($rawPath, $res) {
         } | Select-Object -First 1).IPAddress
         if (-not $localIP) { $localIP = "127.0.0.1" }
         Send-Json $res @{ ip = $localIP; port = 8765 }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/qr-image") {
+        $qrDir = Join-Path $PSScriptRoot "..\Media\qr code"
+        $img = Get-ChildItem -Path $qrDir -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.Extension -match "\.(png|jpg|jpeg|webp|gif|svg)$"
+        } | Select-Object -First 1
+        if ($img) { Send-Json $res @{ url = "/Media/qr code/" + [Uri]::EscapeDataString($img.Name) } }
+        else { Send-Json $res @{ url = $null } }
         return $true
     }
 

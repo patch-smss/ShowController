@@ -3,7 +3,7 @@ export function init(container, ctx) {
   box.className = 'control-box';
   box.style.cssText = 'display:flex; align-items:center; gap:10px;';
   box.innerHTML = `
-    <div id="qr-box" style="background:#fff; padding:4px; border-radius:6px; width:76px; height:76px; display:flex; align-items:center; justify-content:center; flex-shrink:0;"></div>
+    <div id="qr-box" style="background:#fff; padding:4px; border-radius:6px; width:76px; height:76px; display:flex; align-items:center; justify-content:center; flex-shrink:0; overflow:hidden;"></div>
     <div style="font-size:12px; line-height:1.4; overflow:hidden; flex:1;">
       <strong style="color:#38bdf8;">Wi-Fi Phone Remote</strong><br>
       <span id="remote-url" style="color:#94a3b8; word-break:break-all;">Connecting...</span><br>
@@ -12,10 +12,16 @@ export function init(container, ctx) {
   `;
   container.appendChild(box);
 
-  fetch('/api/info').then(r => r.json()).then(data => {
+  fetch('/api/info').then(r => r.json()).then(async data => {
     const url = `http://${data.ip}:${data.port}/remote.html`;
     box.querySelector('#remote-url').textContent = url;
     box.querySelector('#btn-copy-remote').onclick = () => navigator.clipboard?.writeText(url);
+
+    const qrRes = await (await fetch('/api/qr-image')).json();
+    if (qrRes.url) {
+      box.querySelector('#qr-box').innerHTML = `<img src="${qrRes.url}" style="width:100%; height:100%; object-fit:contain;" alt="QR" />`;
+      return;
+    }
 
     const script = document.createElement('script');
     script.src = 'https://cloudflare.com';

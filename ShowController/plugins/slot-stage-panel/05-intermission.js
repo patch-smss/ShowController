@@ -1,3 +1,7 @@
+let backdropFile = null;
+let intermissionSlideIdx = null;
+let prevSlideBeforeIntermission = 1;
+
 export function init(container, ctx) {
   const interBtn = document.createElement('button');
   interBtn.id = 'btn-intermission';
@@ -14,27 +18,45 @@ export function init(container, ctx) {
   picker.accept = 'image/*';
   picker.style.display = 'none';
 
-  const syncButton = () => {
-    interBtn.classList.toggle('active', ctx.state.intermission);
-  };
+  const syncButton = () => interBtn.classList.toggle('active', ctx.state.intermission);
 
-  const setIntermission = (active) => {
+  const setIntermission = async (active) => {
     ctx.state.intermission = active;
     if (active) {
       ctx.state.blackout = false;
       ctx.emit('SYNC_STAGE_BUTTONS');
+      try {
+        const st = await (await fetch('/api/ppt/sync')).json();
+        if (st.ok && st.current && st.current !== intermissionSlideIdx) {
+          prevSlideBeforeIntermission = st.current;
+        }
+      } catch {}
+      const res = await ctx.actions.pptPost('/api/ppt/intermission', { file: backdropFile, show: true });
+      if (res.ok) intermissionSlideIdx = res.slide;
+    } else {
+      const activeCue = ctx.store.cues[ctx.store.getActiveIndex()];
+      const target = prevSlideBeforeIntermission || activeCue?.startSlide || 1;
+      await ctx.actions.pptPost('/api/ppt/nav', { action: 'goto', slide: target });
     }
     syncButton();
-    ctx.channel.postMessage({ type: 'INTERMISSION', active });
   };
 
   interBtn.onclick = () => setIntermission(!ctx.state.intermission);
   bgBtn.onclick = () => picker.click();
-  picker.onchange = () => {
+  picker.onchange = async () => {
     const file = picker.files.item(0);
     if (!file) return;
-    ctx.channel.postMessage({ type: 'SET_INTERMISSION_IMG', url: URL.createObjectURL(file) });
-    bgBtn.textContent = 'Backdrop: ' + file.name;
+    const up = await fetch('/api/upload-media', {
+      method: 'POST',
+      headers: { 'X-Filename': encodeURIComponent(file.name) },
+      body: file
+    });
+    if (up.ok) {
+      backdropFile = file.name;
+      bgBtn.textContent = 'Backdrop: ' + file.name;
+      const res = await ctx.actions.pptPost('/api/ppt/intermission', { file: backdropFile, show: ctx.state.intermission });
+      if (res.ok) intermissionSlideIdx = res.slide;
+    }
     picker.value = '';
   };
 
@@ -42,7 +64,7 @@ export function init(container, ctx) {
   container.appendChild(bgBtn);
   container.appendChild(picker);
 
-  ctx.on('CUE_TRIGGER', () => setIntermission(false));
+  ctx.on('CUE_TRIGGER', () => { ctx.state.intermission = false; syncButton(); });
   ctx.on('TOGGLE_INTERMISSION', () => setIntermission(!ctx.state.intermission));
   ctx.on('SYNC_STAGE_BUTTONS', syncButton);
   ctx.on('SHOW_ENDED', ({ endAction }) => {
