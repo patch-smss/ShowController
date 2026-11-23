@@ -1,3 +1,5 @@
+# Monitor detection, local IP lookup, QR image finder, and 50/50 window snap
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;

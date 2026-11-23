@@ -2,15 +2,13 @@ Add-Type -AssemblyName System.Windows.Forms
 $Host.UI.RawUI.WindowTitle = "ShowBridge"
 $port = 8765
 
-# Auto-load all backend API modules in ps\
+# Local HTTP server (port8765), plugin manifest scanner, and API router
+
 $psDir = Join-Path $PSScriptRoot "ps"
 if (Test-Path $psDir) {
-    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
-        . $_.FullName
-    }
+    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object { . $_.FullName }
 }
 
-# Ensure plugin zone folders exist
 $pluginsRoot = Join-Path $PSScriptRoot "plugins"
 $zones = @("slot-header-actions", "slot-cue-top", "slot-toolbar", "slot-cue-panel", "slot-stage-panel")
 foreach ($z in $zones) {
@@ -65,10 +63,13 @@ while ($listener.IsListening) {
         }
 
         if ($rawPath -eq "/api/plugins") {
+            $isMobile = ($req.QueryString["client"] -eq "mobile")
             $manifest = @{}
             foreach ($z in $zones) {
                 $zPath = Join-Path $pluginsRoot $z
-                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)?v=$($_.LastWriteTimeUtc.Ticks)" })
+                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Where-Object {
+                    if ($isMobile) { $_.Name -notlike "*-pc.js" } else { $_.Name -notlike "*-mobile.js" }
+                } | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)?v=$($_.LastWriteTimeUtc.Ticks)" })
                 $manifest[$z] = $files
             }
             Send-Json $res $manifest

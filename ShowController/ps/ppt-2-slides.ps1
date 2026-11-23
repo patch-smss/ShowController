@@ -1,3 +1,5 @@
+# Slide insertion for .pptx, images, videos, and hidden intermission slide
+
 function Insert-MediaSlide($pres, $fullPath, $kind) {
     $idx = $pres.Slides.Count + 1
     $sl = $pres.Slides.Add($idx, 12)

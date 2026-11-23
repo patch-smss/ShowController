@@ -1,5 +1,7 @@
 $script:phoneQueue = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
+#Phone remote command queue, PIN check, and Wifi media upload endpoint
+
 function Test-RemotePin($providedPin) {
     $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ remotePin = "" } }
     if ($cfg.remotePin -and $providedPin -ne $cfg.remotePin) { return $false }

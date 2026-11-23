@@ -1,3 +1,5 @@
+# Live slideshow sync and COM navigation (next, prev, goto, blackout, freeze)
+
 function Handle-PptNavApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/sync") {
         try {

@@ -3,6 +3,8 @@ $script:masterPres = $null
 $script:frozenTempSlide = 0
 $script:intermissionSlide = 0
 
+# PowerPoint COM lifecycle, master deck setup, save/load, and clean exit
+
 function Get-PptApp {
     if ($null -ne $script:pptApp) {
         try { $null = $script:pptApp.Version; return $script:pptApp } catch { $script:pptApp = $null }

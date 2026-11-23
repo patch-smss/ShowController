@@ -1,5 +1,7 @@
 let activeAudio = null;
 
+// Hidden Monitor 1 audio player with configurable fade-in and fade-out
+
 function fadeAudio(audioEl, targetVol, durationMs, onDone) {
   if (audioEl._fadeTimer) clearInterval(audioEl._fadeTimer);
   if (!durationMs || durationMs <= 0) {

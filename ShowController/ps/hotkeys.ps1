@@ -1,3 +1,5 @@
+#OS-level global presentation clicker hotkeys via Win32 RegisterHotKey
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -ReferencedAssemblies System.Windows.Forms @"
 using System;

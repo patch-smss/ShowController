@@ -2,6 +2,8 @@
 import { store, channel } from '/js/store.js';
 import { playAudioCue, stopAudio } from '/js/audio-engine.js';
 
+// Core plugin loader, event bus, and cue execution orchestrator
+
 const listeners = new Map();
 
 const ctx = {
@@ -11,7 +13,8 @@ const ctx = {
     blackout: true,
     intermission: false,
     endAction: 'intermission',
-    audioPrefs: { fadeIn: true, fadeOut: true },
+    audioPrefs: { fadeIn: true, fadeOut: true, fadeMs: 1500 },
+    settings: { fadeMs: 1500, stopAudioOnVideo: false, aspectRatio: '16:9', imageFit: 'contain', confirmPrompts: true, remotePin: '' },
     finishedText: null
   },
   on(event, fn) {
@@ -45,12 +48,16 @@ export async function triggerCue(index) {
   ctx.emit('CUE_TRIGGER', { cue, index });
 
   if (cue.kind === 'audio') {
-    playAudioCue(cue, ctx.state.audioPrefs, () => {
+    playAudioCue(cue, { ...ctx.state.audioPrefs, fadeMs: ctx.state.settings.fadeMs }, () => {
       ctx.state.finishedText = '-- (Finished)';
       ctx.emit('STORE_UPDATED');
     });
     pptPost('/api/ppt/nav', { action: 'focus' }).catch(() => {});
     return;
+  }
+
+  if (cue.kind === 'video' && ctx.state.settings.stopAudioOnVideo) {
+    stopAudio(ctx.state.audioPrefs.fadeOut, ctx.state.settings.fadeMs);
   }
 
   if (cue.kind === 'youtube' || cue.kind === 'canva') return;
@@ -68,20 +75,19 @@ export async function triggerCue(index) {
 }
 
 export function nextCue() {
-  if (store.isAtEnd) return;
+  if (store.cues.length === 0) return;
+  if (store.isAtEnd) { store.isAtEnd = false; triggerCue(0); return; }
   const idx = store.getActiveIndex();
-  if (idx + 1 < store.cues.length) {
-    triggerCue(idx + 1);
-  } else if (store.cues.length > 0) {
-    store.isAtEnd = true;
-    ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction });
-  }
+  if (idx + 1 < store.cues.length) triggerCue(idx + 1);
+  else { store.isAtEnd = true; ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction }); }
 }
 
 export function prevCue() {
+  if (store.cues.length === 0) return;
   const idx = store.getActiveIndex();
-  if (store.isAtEnd && idx >= 0) return triggerCue(idx);
-  if (idx - 1 >= 0) triggerCue(idx - 1);
+  if (store.isAtEnd && idx >= 0) { store.isAtEnd = false; triggerCue(idx); return; }
+  if (idx <= 0) { triggerCue(store.cues.length - 1); return; }
+  triggerCue(idx - 1);
 }
 
 export async function openProjector() {
@@ -89,13 +95,11 @@ export async function openProjector() {
 }
 
 export async function endShow() {
-  if (!confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
+  if (ctx.state.settings.confirmPrompts && !confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
   if (confirm('Save a copy of the Master PowerPoint presentation (.pptx) before closing?')) {
     const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
     const name = prompt('Enter filename for Master PPTX (saved in Media folder):', defaultName);
-    if (name) {
-      await pptPost('/api/ppt/save', { name });
-    }
+    if (name) await pptPost('/api/ppt/save', { name });
   }
   stopAudio(false);
   ctx.emit('END_SHOW');
@@ -108,23 +112,19 @@ export async function endShow() {
 }
 
 ctx.actions = {
-  triggerCue,
-  nextCue,
-  prevCue,
-  openProjector,
-  endShow,
-  pptPost,
-  stopAudio,
+  triggerCue, nextCue, prevCue, openProjector, endShow, pptPost, stopAudio,
   ensureProjectorOpen: openProjector,
   getProjectorWin: () => null,
   closeWebWindow: () => fetch('/api/focus-browser').catch(() => {}),
-  preloadCue: (index) => {
-    const cue = store.cues[index];
-    if (cue) ctx.emit('CUE_PRELOAD', { cue, index });
-  }
+  preloadCue: (index) => { const cue = store.cues[index]; if (cue) ctx.emit('CUE_PRELOAD', { cue, index }); }
 };
 
 (async () => {
+  try {
+    const cfg = await (await fetch('/api/settings')).json();
+    Object.assign(ctx.state.settings, cfg);
+    ctx.state.audioPrefs.fadeMs = cfg.fadeMs ?? 1500;
+  } catch {}
   try {
     const manifest = await (await fetch('/api/plugins')).json();
     for (const [zoneId, urls] of Object.entries(manifest)) {
@@ -141,7 +141,7 @@ ctx.actions = {
   } catch (err) { console.error('Plugin manifest error:', err); }
 })();
 
-ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut));
+ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut, ctx.state.settings.fadeMs));
 ctx.on('PANIC', () => stopAudio(false));
 
 setInterval(async () => {
@@ -154,8 +154,15 @@ setInterval(async () => {
 === FILE: js\audio-engine.js ===
 let activeAudio = null;
 
+// Hidden Monitor 1 audio player with configurable fade-in and fade-out
+
 function fadeAudio(audioEl, targetVol, durationMs, onDone) {
   if (audioEl._fadeTimer) clearInterval(audioEl._fadeTimer);
+  if (!durationMs || durationMs <= 0) {
+    audioEl.volume = targetVol;
+    if (onDone) onDone();
+    return;
+  }
   const steps = 25;
   const stepTime = durationMs / steps;
   const volStep = (targetVol - audioEl.volume) / steps;
@@ -172,12 +179,12 @@ function fadeAudio(audioEl, targetVol, durationMs, onDone) {
   }, stepTime);
 }
 
-export function stopAudio(useFadeOut = true) {
+export function stopAudio(useFadeOut = true, fadeMs = 1500) {
   if (!activeAudio) return;
   const old = activeAudio;
   activeAudio = null;
   if (useFadeOut && !old.paused) {
-    fadeAudio(old, 0, 1500, () => { old.pause(); old.remove(); });
+    fadeAudio(old, 0, fadeMs, () => { old.pause(); old.remove(); });
   } else {
     if (old._fadeTimer) clearInterval(old._fadeTimer);
     old.pause();
@@ -185,15 +192,16 @@ export function stopAudio(useFadeOut = true) {
   }
 }
 
-export function playAudioCue(cue, prefs = { fadeIn: true, fadeOut: true }, onEnded = null) {
-  stopAudio(prefs.fadeOut);
+export function playAudioCue(cue, prefs = { fadeIn: true, fadeOut: true, fadeMs: 1500 }, onEnded = null) {
+  const ms = prefs.fadeMs ?? 1500;
+  stopAudio(prefs.fadeOut, ms);
   const mediaUrl = cue.src.startsWith('blob:')
     ? cue.src
     : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
 
   const audio = document.createElement('audio');
   audio.src = mediaUrl;
-  audio.volume = prefs.fadeIn ? 0 : 1;
+  audio.volume = prefs.fadeIn && ms > 0 ? 0 : 1;
   audio.onended = () => {
     if (activeAudio === audio) activeAudio = null;
     audio.remove();
@@ -202,7 +210,7 @@ export function playAudioCue(cue, prefs = { fadeIn: true, fadeOut: true }, onEnd
   document.body.appendChild(audio);
   audio.play().catch(err => console.warn('Audio playback blocked:', err));
   activeAudio = audio;
-  if (prefs.fadeIn) fadeAudio(audio, 1, 1500);
+  if (prefs.fadeIn) fadeAudio(audio, 1, ms);
 }
 
 
@@ -211,6 +219,8 @@ export function playAudioCue(cue, prefs = { fadeIn: true, fadeOut: true }, onEnd
 const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
 const AUD_EXTS = ['mp3', 'wav', 'ogg', 'm4a'];
 const VID_EXTS = ['mp4', 'mov', 'webm'];
+
+// Media type detector and auto-uploader/inserter for visual files
 
 export function detectMediaKind(filename) {
   const ext = filename.split('.').pop().toLowerCase();
@@ -251,6 +261,8 @@ export async function ingestMediaFile(file, store) {
 
 === FILE: js\store.js ===
 export const channel = new BroadcastChannel('show_controller_bus');
+
+// Reactive cue list state container
 
 export const store = {
   cues: [],
@@ -309,6 +321,7 @@ export const store = {
 
 
 === FILE: plugins\slot-cue-panel\01-add-link.js ===
+// Manage YouTube/Canva link cues and external browser tabs
 const webTabs = new Map();
 
 function buildDirectUrl(cue) {
@@ -351,12 +364,6 @@ export function init(container, ctx) {
     if (cue.kind !== 'youtube' && cue.kind !== 'canva') return;
     const tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
     if (tab) webTabs.set(cue.id, tab);
-    ctx.actions.ensureProjectorOpen().then(() => {
-      setTimeout(() => {
-        const win = ctx.actions.getProjectorWin();
-        if (win && !win.closed) win.focus();
-      }, 300);
-    });
   });
 
   ctx.on('CUE_TRIGGER', ({ cue }) => {
@@ -616,6 +623,33 @@ export function init(container, ctx) {
 
 
 
+=== FILE: plugins\slot-stage-panel\01b-goto-slide.js ===
+export function init(container, ctx) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex; gap:6px;';
+  row.innerHTML = `
+    <input type="number" id="inp-goto-slide" min="1" placeholder="Page #" style="width:90px; flex:1;" />
+    <button id="btn-goto-slide" style="background:#334155;">Jump to Page</button>
+  `;
+  container.appendChild(row);
+
+  const input = row.querySelector('#inp-goto-slide');
+  const jump = async () => {
+    const page = parseInt(input.value, 10);
+    if (!page || page < 1) return;
+    ctx.emit('SET_BLACKOUT', { active: false });
+    await ctx.actions.pptPost('/api/ppt/nav', { action: 'goto', slide: page + 1 });
+    input.value = '';
+  };
+
+  row.querySelector('#btn-goto-slide').onclick = jump;
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); jump(); }
+  });
+}
+
+
+
 === FILE: plugins\slot-stage-panel\02-focus-stage.js ===
 export function init(container, ctx) {
   const focusBtn = document.createElement('button');
@@ -672,6 +706,49 @@ export function init(container, ctx) {
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     if (e.key.toLowerCase() === 'f') toggleFreeze();
   });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\03b-global-hotkeys-pc.js ===
+export function init(container, ctx) {
+  let enabled = true;
+
+  const btn = document.createElement('button');
+  btn.id = 'btn-global-hotkeys';
+  btn.style.cssText = 'background:#0f766e; font-size:12px;';
+  btn.textContent = 'Clicker Hotkeys: ON';
+
+  const render = () => {
+    btn.textContent = 'Clicker Hotkeys: ' + (enabled ? 'ON' : 'OFF');
+    btn.style.background = enabled ? '#0f766e' : '#334155';
+  };
+
+  btn.onclick = async () => {
+    enabled = !enabled;
+    render();
+    try {
+      await fetch('/api/hotkeys/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+    } catch {}
+  };
+
+  container.appendChild(btn);
+
+  setInterval(async () => {
+    if (!enabled) return;
+    try {
+      const cmds = await (await fetch('/api/hotkeys/poll')).json();
+      for (const act of cmds) {
+        if (act === 'NEXT') ctx.actions.nextCue();
+        if (act === 'PREV') ctx.actions.prevCue();
+        if (act === 'BLACKOUT') ctx.emit('TOGGLE_BLACKOUT');
+      }
+    } catch {}
+  }, 150);
 }
 
 
@@ -743,6 +820,10 @@ export function init(container, ctx) {
 
 
 === FILE: plugins\slot-stage-panel\05-intermission.js ===
+let backdropFile = null;
+let intermissionSlideIdx = null;
+let prevSlideBeforeIntermission = 1;
+
 export function init(container, ctx) {
   const interBtn = document.createElement('button');
   interBtn.id = 'btn-intermission';
@@ -759,27 +840,45 @@ export function init(container, ctx) {
   picker.accept = 'image/*';
   picker.style.display = 'none';
 
-  const syncButton = () => {
-    interBtn.classList.toggle('active', ctx.state.intermission);
-  };
+  const syncButton = () => interBtn.classList.toggle('active', ctx.state.intermission);
 
-  const setIntermission = (active) => {
+  const setIntermission = async (active) => {
     ctx.state.intermission = active;
     if (active) {
       ctx.state.blackout = false;
       ctx.emit('SYNC_STAGE_BUTTONS');
+      try {
+        const st = await (await fetch('/api/ppt/sync')).json();
+        if (st.ok && st.current && st.current !== intermissionSlideIdx) {
+          prevSlideBeforeIntermission = st.current;
+        }
+      } catch {}
+      const res = await ctx.actions.pptPost('/api/ppt/intermission', { file: backdropFile, show: true });
+      if (res.ok) intermissionSlideIdx = res.slide;
+    } else {
+      const activeCue = ctx.store.cues[ctx.store.getActiveIndex()];
+      const target = prevSlideBeforeIntermission || activeCue?.startSlide || 1;
+      await ctx.actions.pptPost('/api/ppt/nav', { action: 'goto', slide: target });
     }
     syncButton();
-    ctx.channel.postMessage({ type: 'INTERMISSION', active });
   };
 
   interBtn.onclick = () => setIntermission(!ctx.state.intermission);
   bgBtn.onclick = () => picker.click();
-  picker.onchange = () => {
+  picker.onchange = async () => {
     const file = picker.files.item(0);
     if (!file) return;
-    ctx.channel.postMessage({ type: 'SET_INTERMISSION_IMG', url: URL.createObjectURL(file) });
-    bgBtn.textContent = 'Backdrop: ' + file.name;
+    const up = await fetch('/api/upload-media', {
+      method: 'POST',
+      headers: { 'X-Filename': encodeURIComponent(file.name) },
+      body: file
+    });
+    if (up.ok) {
+      backdropFile = file.name;
+      bgBtn.textContent = 'Backdrop: ' + file.name;
+      const res = await ctx.actions.pptPost('/api/ppt/intermission', { file: backdropFile, show: ctx.state.intermission });
+      if (res.ok) intermissionSlideIdx = res.slide;
+    }
     picker.value = '';
   };
 
@@ -787,7 +886,7 @@ export function init(container, ctx) {
   container.appendChild(bgBtn);
   container.appendChild(picker);
 
-  ctx.on('CUE_TRIGGER', () => setIntermission(false));
+  ctx.on('CUE_TRIGGER', () => { ctx.state.intermission = false; syncButton(); });
   ctx.on('TOGGLE_INTERMISSION', () => setIntermission(!ctx.state.intermission));
   ctx.on('SYNC_STAGE_BUTTONS', syncButton);
   ctx.on('SHOW_ENDED', ({ endAction }) => {
@@ -842,13 +941,71 @@ export function init(container, ctx) {
 
 
 
-=== FILE: plugins\slot-stage-panel\08-remote.js ===
+=== FILE: plugins\slot-stage-panel\08-phone-upload-mobile.js ===
+// Mobile-only plugin to upload local media or push web links to the host queue
+export function init(container, ctx) {
+  const box = document.createElement('div');
+  box.className = 'control-box';
+  box.innerHTML = `
+    <strong style="font-size:11px; color:#94a3b8; text-transform:uppercase;">Upload Photo / Video / Audio / PPTX</strong>
+    <input type="file" id="phone-file" accept="image/*,video/*,audio/*,.ppt,.pptx" style="margin-top:6px; width:100%;" />
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;">
+      <button id="btn-up-queue">+ Add to Queue</button>
+      <button id="btn-up-play" style="background:#0284c7;">Upload &amp; Play</button>
+    </div>
+    <strong style="font-size:11px; color:#94a3b8; text-transform:uppercase; display:block; margin-top:10px;">Push YouTube / Canva Link</strong>
+    <input type="text" id="phone-link" placeholder="Paste YouTube or Canva link..." style="margin-top:6px; width:100%;" />
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;">
+      <button id="btn-link-queue">+ Add Link</button>
+      <button id="btn-link-play" style="background:#7c3aed;">Open Now</button>
+    </div>
+  `;
+  container.appendChild(box);
+
+  const upload = async (playNow) => {
+    const file = box.querySelector('#phone-file').files[0];
+    if (!file) return ctx.actions.toast('Select a file first', true);
+    ctx.actions.toast('Uploading ' + file.name + '...');
+    const res = await fetch('/api/phone-upload', {
+      method: 'POST',
+      headers: {
+        'X-Filename': encodeURIComponent(file.name),
+        'X-Pin': ctx.actions.getPin(),
+        'X-PlayNow': playNow ? '1' : '0'
+      },
+      body: file
+    });
+    if (res.status === 401) return ctx.actions.toast('Invalid Remote PIN', true);
+    if (!res.ok) return ctx.actions.toast('Upload failed', true);
+    box.querySelector('#phone-file').value = '';
+    ctx.actions.toast(playNow ? 'Playing: ' + file.name : 'Queued: ' + file.name);
+  };
+
+  const pushLink = (playNow) => {
+    const inp = box.querySelector('#phone-link');
+    const url = inp.value.trim();
+    if (!url) return;
+    ctx.actions.sendCmd({ type: 'ADD_LINK', url, playNow });
+    inp.value = '';
+  };
+
+  box.querySelector('#btn-up-queue').onclick = () => upload(false);
+  box.querySelector('#btn-up-play').onclick = () => upload(true);
+  box.querySelector('#btn-link-queue').onclick = () => pushLink(false);
+  box.querySelector('#btn-link-play').onclick = () => pushLink(true);
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\08-remote-pc.js ===
+import { detectMediaKind } from '/js/media.js';
+
 export function init(container, ctx) {
   const box = document.createElement('div');
   box.className = 'control-box';
   box.style.cssText = 'display:flex; align-items:center; gap:10px;';
   box.innerHTML = `
-    <div id="qr-box" style="background:#fff; padding:4px; border-radius:6px; width:76px; height:76px; display:flex; align-items:center; justify-content:center; flex-shrink:0;"></div>
+    <div id="qr-box" style="background:#fff; padding:4px; border-radius:6px; width:76px; height:76px; display:flex; align-items:center; justify-content:center; flex-shrink:0; overflow:hidden;"></div>
     <div style="font-size:12px; line-height:1.4; overflow:hidden; flex:1;">
       <strong style="color:#38bdf8;">Wi-Fi Phone Remote</strong><br>
       <span id="remote-url" style="color:#94a3b8; word-break:break-all;">Connecting...</span><br>
@@ -857,23 +1014,18 @@ export function init(container, ctx) {
   `;
   container.appendChild(box);
 
-  fetch('/api/info').then(r => r.json()).then(data => {
+  fetch('/api/info').then(r => r.json()).then(async data => {
     const url = `http://${data.ip}:${data.port}/remote.html`;
     box.querySelector('#remote-url').textContent = url;
     box.querySelector('#btn-copy-remote').onclick = () => navigator.clipboard?.writeText(url);
 
-    const script = document.createElement('script');
-    script.src = 'https://cloudflare.com';
-    script.onload = () => {
-      new window.QRCode(box.querySelector('#qr-box'), { text: url, width: 68, height: 68, correctLevel: window.QRCode.CorrectLevel.L });
-    };
-    script.onerror = () => {
-      box.querySelector('#qr-box').innerHTML = '<span style="color:#0f172a;font-size:10px;font-weight:700;text-align:center;">OPEN URL<br>ON PHONE</span>';
-    };
-    document.head.appendChild(script);
-  }).catch(() => {
-    box.querySelector('#remote-url').textContent = 'Offline';
-  });
+    const qrRes = await (await fetch('/api/qr-image')).json();
+    if (qrRes.url) {
+      box.querySelector('#qr-box').innerHTML = `<img src="${qrRes.url}" style="width:100%; height:100%; object-fit:contain;" alt="QR" />`;
+      return;
+    }
+    box.querySelector('#qr-box').innerHTML = '<span style="color:#0f172a;font-size:10px;font-weight:700;text-align:center;">OPEN URL<br>ON PHONE</span>';
+  }).catch(() => { box.querySelector('#remote-url').textContent = 'Offline'; });
 
   setInterval(async () => {
     try {
@@ -881,6 +1033,10 @@ export function init(container, ctx) {
       for (const cmd of cmds) {
         if (cmd.type === 'NEXT') ctx.actions.nextCue();
         if (cmd.type === 'PREV') ctx.actions.prevCue();
+        if (cmd.type === 'GOTO_PAGE' && cmd.page >= 1) {
+          ctx.emit('SET_BLACKOUT', { active: false });
+          ctx.actions.pptPost('/api/ppt/nav', { action: 'goto', slide: cmd.page + 1 });
+        }
         if (cmd.type === 'BLACKOUT') ctx.emit('TOGGLE_BLACKOUT');
         if (cmd.type === 'INTERMISSION') ctx.emit('TOGGLE_INTERMISSION');
         if (cmd.type === 'FREEZE') ctx.emit('TOGGLE_FREEZE');
@@ -893,6 +1049,18 @@ export function init(container, ctx) {
           ctx.store.addCue(cmd.url, kind, cmd.url);
           if (cmd.playNow) ctx.actions.triggerCue(ctx.store.cues.length - 1);
         }
+        if (cmd.type === 'ADD_MEDIA' && cmd.file) {
+          const ext = cmd.file.split('.').pop().toLowerCase();
+          const kind = ['ppt', 'pptx'].includes(ext) ? 'ppt' : detectMediaKind(cmd.file);
+          if (!kind) continue;
+          if (kind === 'audio') {
+            ctx.store.addCue(cmd.file, 'audio', cmd.file, { tempFile: true });
+          } else {
+            const ins = await ctx.actions.pptPost('/api/ppt/insert', { file: cmd.file, kind });
+            ctx.store.addCue(cmd.file, kind, cmd.file, { tempFile: true, startSlide: ins.startSlide, endSlide: ins.endSlide });
+          }
+          if (cmd.playNow) ctx.actions.triggerCue(ctx.store.cues.length - 1);
+        }
       }
     } catch {}
   }, 600);
@@ -900,7 +1068,119 @@ export function init(container, ctx) {
 
 
 
-=== FILE: plugins\slot-stage-panel\09-end-show.js ===
+=== FILE: plugins\slot-stage-panel\08b-settings-pc.js ===
+// PC-only collapsible operator settings and global hotkey recorder
+export function init(container, ctx) {
+  const toggleBtn = document.createElement('button');
+  toggleBtn.style.cssText = 'background:#334155; font-size:12px;';
+  toggleBtn.textContent = 'Operator Settings [+]';
+
+  const box = document.createElement('div');
+  box.className = 'control-box';
+  box.style.display = 'none';
+  box.innerHTML = `
+    <label style="justify-content:space-between;">Audio Fade (ms):
+      <input type="number" id="set-fade" min="0" max="10000" step="100" style="width:80px;" />
+    </label>
+    <label><input type="checkbox" id="set-stop-vid" /> Auto-stop music on video</label>
+    <label style="justify-content:space-between;">Aspect Ratio:
+      <select id="set-aspect" style="width:95px; flex:none;"><option value="16:9">16:9</option><option value="4:3">4:3</option></select>
+    </label>
+    <label style="justify-content:space-between;">Image Fit:
+      <select id="set-fit" style="width:95px; flex:none;"><option value="contain">Contain</option><option value="cover">Cover</option></select>
+    </label>
+    <label><input type="checkbox" id="set-confirm" /> Confirm Clear / End Show</label>
+    <label style="justify-content:space-between;">Remote PIN:
+      <input type="text" id="set-pin" placeholder="None" style="width:80px; flex:none;" />
+    </label>
+    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:8px;">
+      <button type="button" data-hk="next" style="font-size:11px; padding:5px;">Next Key</button>
+      <button type="button" data-hk="prev" style="font-size:11px; padding:5px;">Prev Key</button>
+      <button type="button" data-hk="blackout" style="font-size:11px; padding:5px;">Black Key</button>
+    </div>
+    <div id="hk-err" style="color:#f87171; font-size:11px; margin-top:4px; display:none;"></div>
+    <button id="btn-save-settings" style="background:#0284c7; width:100%; margin-top:8px;">Save Settings</button>
+  `;
+
+  container.appendChild(toggleBtn);
+  container.appendChild(box);
+
+  let cfg = { fadeMs: 1500, stopAudioOnVideo: false, aspectRatio: '16:9', imageFit: 'contain', confirmPrompts: true, remotePin: '', hotkeys: { next: 34, prev: 33, blackout: 190 } };
+  const errEl = box.querySelector('#hk-err');
+
+  const showErr = (msg) => {
+    errEl.textContent = msg;
+    errEl.style.display = msg ? 'block' : 'none';
+  };
+
+  const hasConflict = () => {
+    const { next, prev, blackout } = cfg.hotkeys;
+    if (next === prev) return 'Conflict: Next Key and Prev Key cannot be the same.';
+    if (next === blackout) return 'Conflict: Next Key and Black Key cannot be the same.';
+    if (prev === blackout) return 'Conflict: Prev Key and Black Key cannot be the same.';
+    return '';
+  };
+
+  const syncForm = () => {
+    box.querySelector('#set-fade').value = cfg.fadeMs;
+    box.querySelector('#set-stop-vid').checked = !!cfg.stopAudioOnVideo;
+    box.querySelector('#set-aspect').value = cfg.aspectRatio;
+    box.querySelector('#set-fit').value = cfg.imageFit;
+    box.querySelector('#set-confirm').checked = cfg.confirmPrompts !== false;
+    box.querySelector('#set-pin').value = cfg.remotePin || '';
+  };
+
+  fetch('/api/settings').then(r => r.ok ? r.json() : null).then(data => {
+    if (data) { Object.assign(cfg, data); Object.assign(ctx.state.settings, cfg); syncForm(); }
+  }).catch(() => {});
+
+  toggleBtn.onclick = () => {
+    const open = box.style.display === 'none';
+    box.style.display = open ? 'flex' : 'none';
+    box.style.flexDirection = 'column';
+    toggleBtn.textContent = open ? 'Operator Settings [-]' : 'Operator Settings [+]';
+  };
+
+  box.querySelectorAll('[data-hk]').forEach(btn => {
+    btn.onclick = () => {
+      const slot = btn.dataset.hk;
+      btn.textContent = 'Press key...';
+      const handler = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        cfg.hotkeys[slot] = e.keyCode;
+        btn.textContent = `${slot.toUpperCase()}: ${e.key}`;
+        showErr(hasConflict());
+        window.removeEventListener('keydown', handler, true);
+      };
+      window.addEventListener('keydown', handler, true);
+    };
+  });
+
+  box.querySelector('#btn-save-settings').onclick = async () => {
+    const conflict = hasConflict();
+    if (conflict) { showErr(conflict); return; }
+    showErr('');
+    cfg.fadeMs = parseInt(box.querySelector('#set-fade').value, 10) || 0;
+    cfg.stopAudioOnVideo = box.querySelector('#set-stop-vid').checked;
+    cfg.aspectRatio = box.querySelector('#set-aspect').value;
+    cfg.imageFit = box.querySelector('#set-fit').value;
+    cfg.confirmPrompts = box.querySelector('#set-confirm').checked;
+    cfg.remotePin = box.querySelector('#set-pin').value.trim();
+    Object.assign(ctx.state.settings, cfg);
+    ctx.state.audioPrefs.fadeMs = cfg.fadeMs;
+    const res = await ctx.actions.pptPost('/api/settings', cfg);
+    if (res?.ok) {
+      box.querySelector('#btn-save-settings').textContent = 'Saved!';
+      setTimeout(() => { box.querySelector('#btn-save-settings').textContent = 'Save Settings'; }, 1200);
+    } else {
+      showErr('Save failed - check that ps/settings-api.ps1 is loaded.');
+    }
+  };
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\09-end-show-pc.js ===
 export function init(container, ctx) {
   const btn = document.createElement('button');
   btn.id = 'btn-end-show';
@@ -913,7 +1193,7 @@ export function init(container, ctx) {
 
 
 
-=== FILE: plugins\slot-toolbar\01-brose-media.js ===
+=== FILE: plugins\slot-toolbar\01-browse-media.js ===
 import { ingestMediaFile } from '/js/media.js';
 
 export function init(container, ctx) {
@@ -940,6 +1220,7 @@ export function init(container, ctx) {
 
 
 === FILE: plugins\slot-toolbar\02-ppt-import.js ===
+// Upload .ppt/.pptx files and immediately append slides into the master presentation
 export function init(container, ctx) {
   const btn = document.createElement('button');
   btn.textContent = '+ PowerPoint';
@@ -953,13 +1234,21 @@ export function init(container, ctx) {
   btn.onclick = () => input.click();
   input.onchange = async () => {
     for (const file of input.files) {
-      const res = await fetch('/api/upload-media', {
+      const up = await fetch('/api/upload-media', {
         method: 'POST',
         headers: { 'X-Filename': encodeURIComponent(file.name) },
         body: file
       });
-      if (res.ok) ctx.store.addCue(file.name, 'ppt', file.name, { tempFile: true });
-      else alert('Failed to copy PowerPoint file to Media folder.');
+      if (!up.ok) {
+        alert('Failed to copy PowerPoint file to Media folder.');
+        continue;
+      }
+      const ins = await ctx.actions.pptPost('/api/ppt/insert', { file: file.name, kind: 'ppt' });
+      ctx.store.addCue(file.name, 'ppt', file.name, {
+        tempFile: true,
+        startSlide: ins.ok ? ins.startSlide : null,
+        endSlide: ins.ok ? ins.endSlide : null
+      });
     }
     input.value = '';
   };
@@ -970,7 +1259,111 @@ export function init(container, ctx) {
 
 
 
+=== FILE: ps\hotkeys.ps1 ===
+#OS-level global presentation clicker hotkeys via Win32 RegisterHotKey
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -ReferencedAssemblies System.Windows.Forms @"
+using System;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+public class GlobalHotkeyHost {
+    [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+    [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    private class MsgWin : NativeWindow {
+        public Action<int> OnHotkey;
+        public MsgWin() { CreateHandle(new CreateParams()); }
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == 0x0312 && OnHotkey != null) OnHotkey(m.WParam.ToInt32());
+            base.WndProc(ref m);
+        }
+    }
+
+    public static ConcurrentQueue<string> Queue = new ConcurrentQueue<string>();
+    private static Thread _thread;
+    private static MsgWin _win;
+    private static bool _active = false;
+    public static uint VkNext = 0x22, VkPrev = 0x21, VkBlack = 0xBE;
+
+    public static void Rebind(uint nextVk, uint prevVk, uint blackVk) {
+        VkNext = nextVk; VkPrev = prevVk; VkBlack = blackVk;
+        if (_active) { SetEnabled(false); Thread.Sleep(50); SetEnabled(true); }
+    }
+
+    public static void SetEnabled(bool enable) {
+        if (enable && !_active) {
+            _active = true;
+            _thread = new Thread(() => {
+                _win = new MsgWin();
+                _win.OnHotkey = (id) => {
+                    if (id == 1 || id == 3) Queue.Enqueue("NEXT");
+                    if (id == 2 || id == 4) Queue.Enqueue("PREV");
+                    if (id == 5) Queue.Enqueue("BLACKOUT");
+                };
+                RegisterHotKey(_win.Handle, 1, 0, VkNext);
+                RegisterHotKey(_win.Handle, 2, 0, VkPrev);
+                RegisterHotKey(_win.Handle, 3, 0, 0x27);
+                RegisterHotKey(_win.Handle, 4, 0, 0x25);
+                RegisterHotKey(_win.Handle, 5, 0, VkBlack);
+                Application.Run();
+            });
+            _thread.SetApartmentState(ApartmentState.STA);
+            _thread.IsBackground = true;
+            _thread.Start();
+        } else if (!enable && _active) {
+            _active = false;
+            if (_win != null) {
+                for (int i = 1; i <= 5; i++) UnregisterHotKey(_win.Handle, i);
+                _win.DestroyHandle();
+                _win = null;
+            }
+            Application.ExitThread();
+        }
+    }
+}
+"@
+
+$script:hotkeysEnabled = $true
+try {
+    if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) {
+        $cfg = Get-ShowSettings
+        [GlobalHotkeyHost]::Rebind([uint32]$cfg.hotkeys.next, [uint32]$cfg.hotkeys.prev, [uint32]$cfg.hotkeys.blackout)
+    } else {
+        [GlobalHotkeyHost]::SetEnabled($true)
+    }
+} catch {}
+
+function Handle-HotkeysApi($rawPath, $req, $res) {
+    if ($rawPath -eq "/api/hotkeys/poll") {
+        $items = @(); $val = $null
+        while ([GlobalHotkeyHost]::Queue.TryDequeue([ref]$val)) { $items += $val }
+        $json = if ($items.Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject @($items) -Compress }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $res.ContentType = "application/json; charset=utf-8"
+        $res.OutputStream.Write($bytes, 0, $bytes.Length)
+        $res.Close()
+        return $true
+    }
+
+    if ($rawPath -eq "/api/hotkeys/toggle" -and $req.HttpMethod -eq "POST") {
+        $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+        $script:hotkeysEnabled = [bool]$body.enabled
+        try { [GlobalHotkeyHost]::SetEnabled($script:hotkeysEnabled) } catch {}
+        Send-Json $res @{ ok = $true; enabled = $script:hotkeysEnabled }
+        return $true
+    }
+
+    return $false
+}
+
+
+
 === FILE: ps\media-api.ps1 ===
+# Handle local file uploads (with Windows Unblock-File) and temp file cleanup
 function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/upload-media" -and $req.HttpMethod -eq "POST") {
         $relPath = [System.Uri]::UnescapeDataString($req.Headers["X-Filename"]).Replace('/', '\').TrimStart('\')
@@ -1005,10 +1398,13 @@ function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
 
 
 
-=== FILE: ps\ppt-com.ps1 ===
+=== FILE: ps\ppt-1-core.ps1 ===
 $script:pptApp = $null
 $script:masterPres = $null
 $script:frozenTempSlide = 0
+$script:intermissionSlide = 0
+
+# PowerPoint COM lifecycle, master deck setup, save/load, and clean exit
 
 function Get-PptApp {
     if ($null -ne $script:pptApp) {
@@ -1030,8 +1426,9 @@ function Ensure-MasterPresentation($mediaDir) {
         if ($p.FullName -eq $masterPath) { $script:masterPres = $p; break }
     }
     if ($null -eq $script:masterPres) {
+        $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ aspectRatio = "16:9" } }
         $script:masterPres = $app.Presentations.Add(-1)
-        $script:masterPres.PageSetup.SlideSize = 16
+        $script:masterPres.PageSetup.SlideSize = if ($cfg.aspectRatio -eq "4:3") { 15 } else { 16 }
         $s1 = $script:masterPres.Slides.Add(1, 12)
         $s1.FollowMasterBackground = 0; $s1.Background.Fill.Solid(); $s1.Background.Fill.ForeColor.RGB = 0
         $script:masterPres.SaveAs($masterPath)
@@ -1056,26 +1453,6 @@ function Start-StageSlideShow($pres) {
     return $ssWin
 }
 
-function Insert-MediaSlide($pres, $fullPath, $kind) {
-    $idx = $pres.Slides.Count + 1
-    $sl = $pres.Slides.Add($idx, 12)
-    $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
-    $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
-    if ($kind -eq "image") {
-        $shp = $sl.Shapes.AddPicture($fullPath, 0, -1, 0, 0)
-        $shp.LockAspectRatio = -1
-        $scale = [Math]::Min($sw / $shp.Width, $sh / $shp.Height)
-        $shp.Width = $shp.Width * $scale
-        $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
-    } elseif ($kind -eq "video") {
-        $shp = $sl.Shapes.AddMediaObject2($fullPath, 0, -1, 0, 0, $sw, $sh)
-        $shp.AnimationSettings.PlaySettings.PlayOnEntry = -1
-        $shp.AnimationSettings.PlaySettings.PauseAnimation = 0
-        $shp.AnimationSettings.PlaySettings.HideWhileNotPlaying = -1
-    }
-    return $idx
-}
-
 function Close-PptCleanly {
     try {
         if ($null -ne $script:pptApp) {
@@ -1084,13 +1461,14 @@ function Close-PptCleanly {
             if ($script:pptApp.Presentations.Count -eq 0) { $script:pptApp.Quit() }
         }
     } catch {}
-    $script:masterPres = $null; $script:pptApp = $null; $script:frozenTempSlide = 0
+    $script:masterPres = $null; $script:pptApp = $null; $script:frozenTempSlide = 0; $script:intermissionSlide = 0
 }
 
-function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
+function Handle-PptCoreApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/init" -and $req.HttpMethod -eq "POST") {
         try {
             $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres
+            if (Get-Command Arrange-Monitor1Windows -ErrorAction SilentlyContinue) { Arrange-Monitor1Windows }
             Send-Json $res @{ ok = $true; slides = $pres.Slides.Count; current = if ($ssWin) { $ssWin.View.CurrentShowPosition } else { 1 } }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
@@ -1101,8 +1479,7 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
             $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
             $pres = Ensure-MasterPresentation $mediaDir
             $safe = [System.IO.Path]::GetFileNameWithoutExtension($body.name) + ".pptx"
-            $dest = Join-Path $mediaDir $safe
-            $pres.SaveCopyAs($dest)
+            $pres.SaveCopyAs((Join-Path $mediaDir $safe))
             Send-Json $res @{ ok = $true; file = $safe }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
@@ -1121,18 +1498,82 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
             Copy-Item -Path $src -Destination $masterPath -Force
             Unblock-File -Path $masterPath -ErrorAction SilentlyContinue
             $script:masterPres = $app.Presentations.Open($masterPath, 0, 0, -1)
-            $ssWin = Start-StageSlideShow $script:masterPres
+            $script:intermissionSlide = 0
+            Start-StageSlideShow $script:masterPres | Out-Null
+            if (Get-Command Arrange-Monitor1Windows -ErrorAction SilentlyContinue) { Arrange-Monitor1Windows }
             Send-Json $res @{ ok = $true; slides = $script:masterPres.Slides.Count }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
     }
 
     if ($rawPath -eq "/api/ppt/close" -and $req.HttpMethod -eq "POST") {
-        Close-PptCleanly
-        Send-Json $res @{ ok = $true }
-        return $true
+        Close-PptCleanly; Send-Json $res @{ ok = $true }; return $true
     }
 
+    return $false
+}
+
+
+
+=== FILE: ps\ppt-2-slides.ps1 ===
+# Slide insertion for .pptx, images, videos, and hidden intermission slide
+
+function Insert-MediaSlide($pres, $fullPath, $kind) {
+    $idx = $pres.Slides.Count + 1
+    $sl = $pres.Slides.Add($idx, 12)
+    $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
+    $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
+    $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ imageFit = "contain" } }
+
+    if ($kind -eq "image") {
+        $shp = $sl.Shapes.AddPicture($fullPath, 0, -1, 0, 0)
+        $shp.LockAspectRatio = -1
+        $scale = if ($cfg.imageFit -eq "cover") { [Math]::Max($sw / $shp.Width, $sh / $shp.Height) } else { [Math]::Min($sw / $shp.Width, $sh / $shp.Height) }
+        $shp.Width = $shp.Width * $scale
+        $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
+    } elseif ($kind -eq "video") {
+        $shp = $sl.Shapes.AddMediaObject2($fullPath, 0, -1, 0, 0, $sw, $sh)
+        $shp.AnimationSettings.PlaySettings.PlayOnEntry = -1
+        $shp.AnimationSettings.PlaySettings.PauseAnimation = 0
+        $shp.AnimationSettings.PlaySettings.HideWhileNotPlaying = -1
+    }
+    return $idx
+}
+
+function Ensure-IntermissionSlide($pres, $mediaDir, $imgFile) {
+    if ($script:intermissionSlide -gt 0 -and $script:intermissionSlide -le $pres.Slides.Count) {
+        $sl = $pres.Slides.Item($script:intermissionSlide)
+        $sl.SlideShowTransition.Hidden = -1
+        if (-not $imgFile) { return $script:intermissionSlide }
+        while ($sl.Shapes.Count -gt 0) { $sl.Shapes.Item(1).Delete() }
+    } else {
+        $idx = $pres.Slides.Count + 1
+        $sl = $pres.Slides.Add($idx, 12)
+        $sl.SlideShowTransition.Hidden = -1
+        $script:intermissionSlide = $idx
+    }
+    $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
+    $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
+    if ($imgFile) {
+        $full = Join-Path $mediaDir ($imgFile.Replace('/', '\').TrimStart('\'))
+        if (Test-Path $full) {
+            $shp = $sl.Shapes.AddPicture($full, 0, -1, 0, 0)
+            $shp.LockAspectRatio = -1
+            $scale = [Math]::Min($sw / $shp.Width, $sh / $shp.Height)
+            $shp.Width = $shp.Width * $scale
+            $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
+            return $script:intermissionSlide
+        }
+    }
+    $tb = $sl.Shapes.AddTextbox(1, 0, ($sh / 2) - 40, $sw, 80)
+    $tb.TextFrame.TextRange.Text = "INTERMISSION"
+    $tb.TextFrame.TextRange.Font.Size = 44
+    $tb.TextFrame.TextRange.Font.Color.RGB = 0x888888
+    $tb.TextFrame.TextRange.ParagraphFormat.Alignment = 2
+    return $script:intermissionSlide
+}
+
+function Handle-PptSlidesApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/insert" -and $req.HttpMethod -eq "POST") {
         try {
             $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
@@ -1148,6 +1589,30 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
         return $true
     }
 
+    if ($rawPath -eq "/api/ppt/intermission" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir
+            $slideIdx = Ensure-IntermissionSlide $pres $mediaDir $body.file
+            if ($body.show) {
+                $ssWin = Start-StageSlideShow $pres
+                $ssWin.View.State = 1
+                $ssWin.View.GotoSlide($slideIdx)
+            }
+            Send-Json $res @{ ok = $true; slide = $slideIdx }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    return $false
+}
+
+
+
+=== FILE: ps\ppt-3-nav.ps1 ===
+# Live slideshow sync and COM navigation (next, prev, goto, blackout, freeze)
+
+function Handle-PptNavApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/sync") {
         try {
             $app = Get-PptApp; $pres = Ensure-MasterPresentation $mediaDir; $list = @()
@@ -1199,18 +1664,46 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
 === FILE: ps\remote-api.ps1 ===
 $script:phoneQueue = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
-function Handle-RemoteApi($rawPath, $req, $res) {
+#Phone remote command queue, PIN check, and Wifi media upload endpoint
+
+function Test-RemotePin($providedPin) {
+    $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ remotePin = "" } }
+    if ($cfg.remotePin -and $providedPin -ne $cfg.remotePin) { return $false }
+    return $true
+}
+
+function Handle-RemoteApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/phone-cmd" -and $req.HttpMethod -eq "POST") {
         $cmdObj = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+        if (-not (Test-RemotePin $cmdObj.pin)) {
+            $res.StatusCode = 401; Send-Json $res @{ ok = $false; error = "Invalid PIN" }; return $true
+        }
         [void]$script:phoneQueue.Add($cmdObj)
         Send-Json $res @{ ok = $true }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/phone-upload" -and $req.HttpMethod -eq "POST") {
+        if (-not (Test-RemotePin $req.Headers["X-Pin"])) {
+            $res.StatusCode = 401; Send-Json $res @{ ok = $false; error = "Invalid PIN" }; return $true
+        }
+        $safeName = [System.IO.Path]::GetFileName([System.Uri]::UnescapeDataString($req.Headers["X-Filename"]))
+        if (-not $safeName) { $res.StatusCode = 400; Send-Json $res @{ ok = $false; error = "Missing filename" }; return $true }
+        $destPath = Join-Path $mediaDir $safeName
+        $fs = [System.IO.File]::Create($destPath)
+        $req.InputStream.CopyTo($fs)
+        $fs.Close()
+        Unblock-File -Path $destPath -ErrorAction SilentlyContinue
+        $playNow = ($req.Headers["X-PlayNow"] -eq "1")
+        [void]$script:phoneQueue.Add(@{ type = "ADD_MEDIA"; file = $safeName; playNow = $playNow })
+        Send-Json $res @{ ok = $true; file = $safeName }
         return $true
     }
 
     if ($rawPath -eq "/api/poll") {
         $items = @()
         while ($script:phoneQueue.Count -gt 0) {
-            $items += $script:phoneQueue
+            $items += $script:phoneQueue[0]
             $script:phoneQueue.RemoveAt(0)
         }
         $json = if ($items.Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject @($items) -Compress }
@@ -1227,6 +1720,38 @@ function Handle-RemoteApi($rawPath, $req, $res) {
 
 
 === FILE: ps\screens.ps1 ===
+# Monitor detection, local IP lookup, QR image finder, and 50/50 window snap
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Window {
+    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+
+function Arrange-Monitor1Windows {
+    $pri = [System.Windows.Forms.Screen]::PrimaryScreen
+    if (-not $pri) { return }
+    $wa = $pri.WorkingArea
+    $halfW = [int]($wa.Width / 2)
+
+    Get-Process msedge -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*Show Control Deck*"
+    } | ForEach-Object {
+        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null
+        [Win32Window]::MoveWindow($_.MainWindowHandle, $wa.X, $wa.Y, $halfW, $wa.Height, $true) | Out-Null
+    }
+
+    Get-Process POWERPNT -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0
+    } | ForEach-Object {
+        [Win32Window]::ShowWindow($_.MainWindowHandle, 9) | Out-Null
+        [Win32Window]::MoveWindow($_.MainWindowHandle, $wa.X + $halfW, $wa.Y, $halfW, $wa.Height, $true) | Out-Null
+    }
+}
+
 function Handle-ScreensApi($rawPath, $res) {
     if ($rawPath -eq "/api/info") {
         $localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
@@ -1238,6 +1763,16 @@ function Handle-ScreensApi($rawPath, $res) {
         return $true
     }
 
+    if ($rawPath -eq "/api/qr-image") {
+        $qrDir = Join-Path $PSScriptRoot "..\Media\qr code"
+        $img = Get-ChildItem -Path $qrDir -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.Extension -match "\.(png|jpg|jpeg|webp|gif|svg)$"
+        } | Select-Object -First 1
+        if ($img) { Send-Json $res @{ url = "/Media/qr code/" + [Uri]::EscapeDataString($img.Name) } }
+        else { Send-Json $res @{ url = $null } }
+        return $true
+    }
+
     if ($rawPath -eq "/api/screens") {
         $sec = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
         $data = if ($sec) { @{ hasSecond = $true; x = $sec.Bounds.X; y = $sec.Bounds.Y; w = $sec.Bounds.Width; h = $sec.Bounds.Height } }
@@ -1246,10 +1781,16 @@ function Handle-ScreensApi($rawPath, $res) {
         return $true
     }
 
+    if ($rawPath -eq "/api/screens/arrange") {
+        Arrange-Monitor1Windows
+        Send-Json $res @{ ok = $true }
+        return $true
+    }
+
     if ($rawPath -eq "/api/focus-browser") {
         $wshell = New-Object -ComObject WScript.Shell
         Get-Process msedge -ErrorAction SilentlyContinue | Where-Object {
-            $_.MainWindowTitle -ne "" -and $_.MainWindowTitle -notmatch "Show Control|Projector Output"
+            $_.MainWindowTitle -ne "" -and $_.MainWindowTitle -notmatch "Show Control"
         } | ForEach-Object { $wshell.AppActivate($_.Id) | Out-Null }
         Send-Json $res @{ ok = $true }
         return $true
@@ -1260,20 +1801,71 @@ function Handle-ScreensApi($rawPath, $res) {
 
 
 
+=== FILE: ps\settings-api.ps1 ===
+$script:settingsPath = Join-Path $PSScriptRoot "..\settings.json"
+
+# Persistent operator settings storage
+
+function Get-ShowSettings {
+    $defaults = @{
+        fadeMs = 1500
+        stopAudioOnVideo = $false
+        aspectRatio = "16:9"
+        imageFit = "contain"
+        confirmPrompts = $true
+        remotePin = ""
+        hotkeys = @{ next = 34; prev = 33; blackout = 190 }
+    }
+    if (Test-Path $script:settingsPath) {
+        try {
+            $saved = Get-Content $script:settingsPath -Raw | ConvertFrom-Json
+            foreach ($k in @("fadeMs","stopAudioOnVideo","aspectRatio","imageFit","confirmPrompts","remotePin")) {
+                if ($null -ne $saved.$k) { $defaults[$k] = $saved.$k }
+            }
+            if ($null -ne $saved.hotkeys) {
+                $defaults.hotkeys = @{
+                    next = [int]$saved.hotkeys.next
+                    prev = [int]$saved.hotkeys.prev
+                    blackout = [int]$saved.hotkeys.blackout
+                }
+            }
+        } catch {}
+    }
+    return $defaults
+}
+
+function Handle-SettingsApi($rawPath, $req, $res) {
+    if ($rawPath -eq "/api/settings") {
+        if ($req.HttpMethod -eq "POST") {
+            $raw = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd()
+            $obj = $raw | ConvertFrom-Json
+            $obj | ConvertTo-Json -Depth 4 | Out-File -FilePath $script:settingsPath -Encoding utf8
+            if ($null -ne $obj.hotkeys -and [Type]::GetType("GlobalHotkeyHost")) {
+                try { [GlobalHotkeyHost]::Rebind([uint32]$obj.hotkeys.next, [uint32]$obj.hotkeys.prev, [uint32]$obj.hotkeys.blackout) } catch {}
+            }
+            Send-Json $res @{ ok = $true }
+            return $true
+        }
+        Send-Json $res (Get-ShowSettings)
+        return $true
+    }
+    return $false
+}
+
+
+
 === FILE: bridge.ps1 ===
 Add-Type -AssemblyName System.Windows.Forms
 $Host.UI.RawUI.WindowTitle = "ShowBridge"
 $port = 8765
 
-# Auto-load all backend API modules in ps\
+# Local HTTP server (port8765), plugin manifest scanner, and API router
+
 $psDir = Join-Path $PSScriptRoot "ps"
 if (Test-Path $psDir) {
-    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
-        . $_.FullName
-    }
+    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object { . $_.FullName }
 }
 
-# Ensure plugin zone folders exist
 $pluginsRoot = Join-Path $PSScriptRoot "plugins"
 $zones = @("slot-header-actions", "slot-cue-top", "slot-toolbar", "slot-cue-panel", "slot-stage-panel")
 foreach ($z in $zones) {
@@ -1313,10 +1905,12 @@ while ($listener.IsListening) {
     try {
         $context = $listener.GetContext()
         $req = $context.Request; $res = $context.Response
+        $res.Headers.Add("Cache-Control", "no-store")
         $rawPath = [System.Uri]::UnescapeDataString($req.Url.AbsolutePath)
 
         if ($rawPath -eq "/api/shutdown") {
             Send-Json $res @{ status = "stopping" }
+            if ([Type]::GetType("GlobalHotkeyHost")) { [GlobalHotkeyHost]::SetEnabled($false) }
             if (Get-Command Close-PptCleanly -ErrorAction SilentlyContinue) { Close-PptCleanly }
             Start-Sleep -Milliseconds 400
             DisplaySwitch.exe /clone
@@ -1326,20 +1920,27 @@ while ($listener.IsListening) {
         }
 
         if ($rawPath -eq "/api/plugins") {
+            $isMobile = ($req.QueryString["client"] -eq "mobile")
             $manifest = @{}
             foreach ($z in $zones) {
                 $zPath = Join-Path $pluginsRoot $z
-                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)" })
+                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Where-Object {
+                    if ($isMobile) { $_.Name -notlike "*-pc.js" } else { $_.Name -notlike "*-mobile.js" }
+                } | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)?v=$($_.LastWriteTimeUtc.Ticks)" })
                 $manifest[$z] = $files
             }
             Send-Json $res $manifest
             continue
         }
 
-        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
-        if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
-        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
-        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-SettingsApi -ErrorAction SilentlyContinue)  { if (Handle-SettingsApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue)   { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-HotkeysApi -ErrorAction SilentlyContinue)   { if (Handle-HotkeysApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-PptCoreApi -ErrorAction SilentlyContinue)   { if (Handle-PptCoreApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-PptSlidesApi -ErrorAction SilentlyContinue) { if (Handle-PptSlidesApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-PptNavApi -ErrorAction SilentlyContinue)    { if (Handle-PptNavApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)     { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)    { if (Handle-RemoteApi $rawPath $req $res $mediaDir) { continue } }
 
         if ($rawPath -eq "/") { $rawPath = "/control.html" }
         $rel = $rawPath.TrimStart('/').Replace('/', '\')
@@ -1415,73 +2016,104 @@ pause
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Show Phone Remote</title>
+<link rel="stylesheet" href="/style.css">
 <style>
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; background: #0f1115; color: #f1f5f9; margin: 0; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  h1 { font-size: 16px; text-transform: uppercase; letter-spacing: 1px; color: #38bdf8; margin: 0; text-align: center; }
-  button { padding: 15px; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; color: #fff; background: #334155; cursor: pointer; touch-action: manipulation; }
-  button:active { transform: scale(0.98); filter: brightness(1.2); }
-  .btn-next { background: #16a34a; font-size: 20px; padding: 22px; }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .btn-black { background: #dc2626; }
-  .btn-inter { background: #d97706; }
-  .btn-freeze { background: #0284c7; }
-  .btn-panic { background: #7f1d1d; border: 2px solid #ef4444; margin-top: 4px; }
-  .box { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 14px; }
+  body { display: flex; flex-direction: column; height: auto; min-height: 100vh; padding: 14px; gap: 10px; }
+  button { padding: 14px; font-size: 15px; touch-action: manipulation; }
+  .btn-go { font-size: 19px; padding: 20px; }
   #toast { text-align: center; font-size: 12px; color: #4ade80; min-height: 16px; }
+  #offline-view { display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; flex: 1; gap: 14px; padding: 32px 16px; }
 </style>
 </head>
 <body>
-  <h1>Stage Phone Remote</h1>
-  <div id="toast">Ready</div>
-
-  <button class="btn-next" onclick="sendCmd({ type: 'NEXT' })">NEXT CUE ??/button>
-  <button onclick="sendCmd({ type: 'PREV' })">漎?PREVIOUS CUE</button>
-
-  <div class="grid-2">
-    <button class="btn-black" onclick="sendCmd({ type: 'BLACKOUT' })">BLACKOUT (B)</button>
-    <button class="btn-inter" onclick="sendCmd({ type: 'INTERMISSION' })">INTERMISSION (I)</button>
-    <button class="btn-freeze" onclick="sendCmd({ type: 'FREEZE' })">FREEZE (F)</button>
-    <button onclick="sendCmd({ type: 'STOP_AUDIO' })">STOP AUDIO</button>
-    <button style="background:#475569;" onclick="sendCmd({ type: 'BACK_PROJ_TAB' })">PROJECTOR TAB (W)</button>
-    <button style="background:#0369a1;" onclick="sendCmd({ type: 'FOCUS_PROJ' })">FOCUS SCREEN (P)</button>
+  <div id="offline-view">
+    <div style="font-size:28px; font-weight:700; color:#f87171;">[ OFFLINE ]</div>
+    <h2 style="justify-content:center; color:#f87171; font-size:16px; margin:0;">No Connection / Show Not Active</h2>
+    <p style="color:#94a3b8; font-size:13px; margin:0; max-width:280px;">The show has either ended or hasn't started on the host PC yet.</p>
+    <button style="background:#0284c7; padding:14px 28px;" onclick="location.reload()">Refresh Connection</button>
   </div>
 
-  <div class="box">
-    <strong style="font-size:12px; color:#94a3b8; text-transform:uppercase;">Push YouTube / Canva Link</strong>
-    <input type="text" id="link-url" placeholder="Paste YouTube or Canva link..." />
-    <div class="grid-2">
-      <button onclick="pushLink(false)">+ Add to Queue</button>
-      <button style="background:#7c3aed;" onclick="pushLink(true)">??Open Now</button>
-    </div>
+  <div id="active-view" style="display:flex; flex-direction:column; gap:10px;">
+    <h2 style="justify-content:center; margin:0; color:#38bdf8;">Stage Phone Remote</h2>
+    <div id="toast">Ready</div>
+    <input type="password" id="pin-input" placeholder="Remote PIN (leave blank if none)" />
+    <div id="slot-stage-panel" class="controls"></div>
   </div>
 
-  <button class="btn-panic" onclick="if(confirm('Trigger Emergency Blackout?')) sendCmd({ type: 'PANIC' })">PANIC / EMERGENCY BLACKOUT</button>
+<script type="module">
+  const offlineView = document.getElementById('offline-view');
+  const activeView = document.getElementById('active-view');
+  const toastEl = document.getElementById('toast');
+  const pinEl = document.getElementById('pin-input');
+  pinEl.value = localStorage.getItem('show_remote_pin') || '';
+  pinEl.onchange = () => localStorage.setItem('show_remote_pin', pinEl.value.trim());
 
-<script>
-  const toast = document.getElementById('toast');
+  const setOffline = (isOff) => {
+    offlineView.style.display = isOff ? 'flex' : 'none';
+    activeView.style.display = isOff ? 'none' : 'flex';
+  };
+
+  const toast = (msg, err = false) => {
+    toastEl.style.color = err ? '#f87171' : '#4ade80';
+    toastEl.textContent = msg;
+    setTimeout(() => { toastEl.textContent = ''; }, 2000);
+  };
+
   async function sendCmd(payload) {
     try {
-      await fetch('/api/phone-cmd', {
+      const res = await fetch('/api/phone-cmd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ ...payload, pin: pinEl.value.trim() })
       });
-      toast.textContent = 'Sent: ' + payload.type;
-      setTimeout(() => { toast.textContent = ''; }, 1500);
-    } catch {
-      toast.textContent = 'Connection lost';
-    }
+      if (res.status === 401) return toast('Invalid Remote PIN', true);
+      toast('Sent: ' + payload.type);
+    } catch { setOffline(true); }
   }
 
-  function pushLink(playNow) {
-    const input = document.getElementById('link-url');
-    const url = input.value.trim();
-    if (!url) return;
-    sendCmd({ type: 'ADD_LINK', url, playNow });
-    input.value = '';
-  }
+  // Proxy stage plugin events to the host PC over HTTP
+  const listeners = new Map();
+  const ctx = {
+    store: { cues: [], getActiveIndex: () => -1 },
+    channel: { postMessage: () => {} },
+    state: { blackout: true, intermission: false, endAction: 'intermission', audioPrefs: { fadeIn: true, fadeOut: true } },
+    on(ev, fn) { if (!listeners.has(ev)) listeners.set(ev, new Set()); listeners.get(ev).add(fn); },
+    emit(ev) {
+      if (ev === 'TOGGLE_BLACKOUT') sendCmd({ type: 'BLACKOUT' });
+      if (ev === 'TOGGLE_INTERMISSION') sendCmd({ type: 'INTERMISSION' });
+      if (ev === 'TOGGLE_FREEZE') sendCmd({ type: 'FREEZE' });
+      if (ev === 'STOP_AUDIO') sendCmd({ type: 'STOP_AUDIO' });
+      if (ev === 'TRIGGER_PANIC') sendCmd({ type: 'PANIC' });
+    },
+    actions: {
+      nextCue: () => sendCmd({ type: 'NEXT' }),
+      prevCue: () => sendCmd({ type: 'PREV' }),
+      openProjector: () => sendCmd({ type: 'FOCUS_PROJ' }),
+      closeWebWindow: () => sendCmd({ type: 'BACK_PROJ_TAB' }),
+      pptPost: async (url, body) => {
+        if (body?.action === 'goto' && body.slide >= 2) await sendCmd({ type: 'GOTO_PAGE', page: body.slide - 1 });
+        if (body?.action === 'blackout') await sendCmd({ type: 'BLACKOUT' });
+        if (url === '/api/ppt/intermission') await sendCmd({ type: 'INTERMISSION' });
+        return { ok: true };
+      },
+      sendCmd, toast, getPin: () => pinEl.value.trim()
+    }
+  };
+
+  try {
+    const manifest = await (await fetch('/api/plugins?client=mobile')).json();
+    const container = document.getElementById('slot-stage-panel');
+    for (const url of (manifest['slot-stage-panel'] || [])) {
+      try { const mod = await import(url); if (mod.init) await mod.init(container, ctx); } catch {}
+    }
+  } catch { setOffline(true); }
+
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/info', { cache: 'no-store' });
+      if (!res.ok) throw new Error();
+    } catch { setOffline(true); }
+  }, 2500);
 </script>
 </body>
 </html>
@@ -1533,6 +2165,10 @@ timeout /t 2 /nobreak >nul
 
 :: 3. Open Control Deck directly in isolated Edge App instance
 start "" msedge --app="http://localhost:8765/control.html" --user-data-dir="%TEMP%\ShowControllerEdge"
+timeout /t 2 /nobreak >nul
+
+:: 4. Initialize PowerPoint Master Deck on Monitor 2 & snap Monitor 1 windows 50/50
+powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'http://localhost:8765/api/ppt/init' -Method POST -UseBasicParsing -TimeoutSec 10 | Out-Null } catch {}"
 exit
 
 
@@ -1561,16 +2197,16 @@ body {
   background: #0f1115;
   color: #f1f5f9;
   margin: 0;
-  padding: 16px;
+  padding: 12px;
   display: grid;
-  grid-template-columns: 1fr 340px;
-  gap: 16px;
+  grid-template-columns: 1fr 265px;
+  gap: 12px;
   height: 100vh;
 }
 .panel {
   background: #1a1d24;
   border-radius: 10px;
-  padding: 14px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1590,13 +2226,13 @@ h2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .preview-card {
   background: #111318;
   border: 1px solid #2d3340;
   border-radius: 8px;
-  padding: 10px;
+  padding: 9px;
 }
 .preview-card span {
   font-size: 11px;
@@ -1616,11 +2252,11 @@ h2 {
 #dropzone {
   border: 2px dashed #475569;
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px;
   text-align: center;
   color: #94a3b8;
-  margin-bottom: 10px;
-  font-size: 13px;
+  margin-bottom: 8px;
+  font-size: 12px;
   transition: 0.15s;
 }
 #dropzone.drag {
@@ -1631,35 +2267,35 @@ h2 {
 .toolbar-row {
   display: flex;
   gap: 6px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
-select, input[type="text"], input[type="number"] {
-  padding: 7px 9px;
+select, input[type="text"], input[type="number"], input[type="password"] {
+  padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid #334155;
   background: #0f172a;
   color: #fff;
-  font-size: 13px;
+  font-size: 12px;
 }
-select, input[type="text"] { flex: 1; }
+select, input[type="text"] { flex: 1; min-width: 0; }
 button {
-  padding: 8px 12px;
+  padding: 7px 10px;
   border: none;
   border-radius: 6px;
   font-weight: 600;
   cursor: pointer;
   background: #334155;
   color: #fff;
-  font-size: 13px;
+  font-size: 12px;
 }
 button:hover { filter: brightness(1.15); }
 #cue-list {
   flex: 1;
-  min-height: 220px;
+  min-height: 200px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   padding: 8px 8px 64px 8px;
   background: #13161c;
   border: 1px dashed #2d3340;
@@ -1669,7 +2305,7 @@ button:hover { filter: brightness(1.15); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 12px;
+  padding: 10px 11px;
   background: #242832;
   border-radius: 6px;
   border-left: 4px solid transparent;
@@ -1698,20 +2334,18 @@ button:hover { filter: brightness(1.15); }
 .controls {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   overflow-y: auto;
 }
-.btn-go { background: #16a34a; font-size: 16px; padding: 14px; }
+.btn-go { background: #16a34a; font-size: 15px; padding: 12px; }
 .btn-proj { background: #0284c7; }
 .btn-danger { background: #7f1d1d; margin-left: 4px; }
-.slot-container { display: flex; flex-direction: column; gap: 8px; }
-
-/* Phase 2: Stage Overlays & Audio Box */
+.slot-container { display: flex; flex-direction: column; gap: 7px; }
 .btn-black.active { background: #dc2626; box-shadow: 0 0 10px rgba(220, 38, 38, 0.55); }
 .btn-inter.active { background: #d97706; }
-.btn-panic { background: #991b1b; border: 1px solid #ef4444; font-size: 14px; padding: 12px; margin-top: 4px; }
-.control-box { background: #13161c; padding: 10px; border-radius: 8px; border: 1px solid #262b36; font-size: 13px; }
-.control-box label { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 6px; }
+.btn-panic { background: #991b1b; border: 1px solid #ef4444; font-size: 13px; padding: 10px; margin-top: 2px; }
+.control-box { background: #13161c; padding: 9px; border-radius: 8px; border: 1px solid #262b36; font-size: 12px; }
+.control-box label { display: flex; align-items: center; gap: 6px; cursor: pointer; margin-top: 5px; }
 
 
 

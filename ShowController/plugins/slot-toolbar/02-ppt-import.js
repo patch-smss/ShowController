@@ -1,3 +1,4 @@
+// Upload .ppt/.pptx files and immediately append slides into the master presentation
 export function init(container, ctx) {
   const btn = document.createElement('button');
   btn.textContent = '+ PowerPoint';
@@ -11,13 +12,21 @@ export function init(container, ctx) {
   btn.onclick = () => input.click();
   input.onchange = async () => {
     for (const file of input.files) {
-      const res = await fetch('/api/upload-media', {
+      const up = await fetch('/api/upload-media', {
         method: 'POST',
         headers: { 'X-Filename': encodeURIComponent(file.name) },
         body: file
       });
-      if (res.ok) ctx.store.addCue(file.name, 'ppt', file.name, { tempFile: true });
-      else alert('Failed to copy PowerPoint file to Media folder.');
+      if (!up.ok) {
+        alert('Failed to copy PowerPoint file to Media folder.');
+        continue;
+      }
+      const ins = await ctx.actions.pptPost('/api/ppt/insert', { file: file.name, kind: 'ppt' });
+      ctx.store.addCue(file.name, 'ppt', file.name, {
+        tempFile: true,
+        startSlide: ins.ok ? ins.startSlide : null,
+        endSlide: ins.ok ? ins.endSlide : null
+      });
     }
     input.value = '';
   };

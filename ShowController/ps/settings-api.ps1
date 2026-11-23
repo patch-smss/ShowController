@@ -1,5 +1,7 @@
 $script:settingsPath = Join-Path $PSScriptRoot "..\settings.json"
 
+# Persistent operator settings storage
+
 function Get-ShowSettings {
     $defaults = @{
         fadeMs = 1500

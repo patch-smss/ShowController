@@ -1,6 +1,8 @@
 import { store, channel } from '/js/store.js';
 import { playAudioCue, stopAudio } from '/js/audio-engine.js';
 
+// Core plugin loader, event bus, and cue execution orchestrator
+
 const listeners = new Map();
 
 const ctx = {

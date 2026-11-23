@@ -1,7 +1,8 @@
+// PC-only collapsible operator settings and global hotkey recorder
 export function init(container, ctx) {
   const toggleBtn = document.createElement('button');
   toggleBtn.style.cssText = 'background:#334155; font-size:12px;';
-  toggleBtn.textContent = 'Operator Settings ▾';
+  toggleBtn.textContent = 'Operator Settings [+]';
 
   const box = document.createElement('div');
   box.className = 'control-box';
@@ -66,7 +67,7 @@ export function init(container, ctx) {
     const open = box.style.display === 'none';
     box.style.display = open ? 'flex' : 'none';
     box.style.flexDirection = 'column';
-    toggleBtn.textContent = open ? 'Operator Settings ▴' : 'Operator Settings ▾';
+    toggleBtn.textContent = open ? 'Operator Settings [-]' : 'Operator Settings [+]';
   };
 
   box.querySelectorAll('[data-hk]').forEach(btn => {
@@ -101,7 +102,7 @@ export function init(container, ctx) {
       box.querySelector('#btn-save-settings').textContent = 'Saved!';
       setTimeout(() => { box.querySelector('#btn-save-settings').textContent = 'Save Settings'; }, 1200);
     } else {
-      showErr('Save failed — check that ps/settings-api.ps1 is loaded.');
+      showErr('Save failed - check that ps/settings-api.ps1 is loaded.');
     }
   };
 }
