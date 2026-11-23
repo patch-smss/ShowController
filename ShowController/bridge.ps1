@@ -12,7 +12,7 @@ if (Test-Path $psDir) {
 
 # Ensure plugin zone folders exist
 $pluginsRoot = Join-Path $PSScriptRoot "plugins"
-$zones = @("slot-toolbar", "slot-cue-panel", "slot-stage-panel")
+$zones = @("slot-header-actions", "slot-cue-top", "slot-toolbar", "slot-cue-panel", "slot-stage-panel")
 foreach ($z in $zones) {
     $zPath = Join-Path $pluginsRoot $z
     if (!(Test-Path $zPath)) { New-Item -ItemType Directory -Path $zPath -Force | Out-Null }
