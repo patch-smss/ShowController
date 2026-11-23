@@ -25,9 +25,7 @@ function Ensure-MasterPresentation($mediaDir) {
         $script:masterPres = $app.Presentations.Add(-1)
         $script:masterPres.PageSetup.SlideSize = 16
         $s1 = $script:masterPres.Slides.Add(1, 12)
-        $s1.FollowMasterBackground = 0
-        $s1.Background.Fill.Solid()
-        $s1.Background.Fill.ForeColor.RGB = 0
+        $s1.FollowMasterBackground = 0; $s1.Background.Fill.Solid(); $s1.Background.Fill.ForeColor.RGB = 0
         $script:masterPres.SaveAs($masterPath)
     }
     return $script:masterPres
@@ -52,7 +50,7 @@ function Start-StageSlideShow($pres) {
 
 function Insert-MediaSlide($pres, $fullPath, $kind) {
     $idx = $pres.Slides.Count + 1
-    $sl = $pres.Slides.Add($idx, 12) # ppLayoutBlank
+    $sl = $pres.Slides.Add($idx, 12)
     $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
     $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
     if ($kind -eq "image") {
@@ -64,18 +62,66 @@ function Insert-MediaSlide($pres, $fullPath, $kind) {
     } elseif ($kind -eq "video") {
         $shp = $sl.Shapes.AddMediaObject2($fullPath, 0, -1, 0, 0, $sw, $sh)
         $shp.AnimationSettings.PlaySettings.PlayOnEntry = -1
+        $shp.AnimationSettings.PlaySettings.PauseAnimation = 0
         $shp.AnimationSettings.PlaySettings.HideWhileNotPlaying = -1
     }
     return $idx
 }
 
+function Close-PptCleanly {
+    try {
+        if ($null -ne $script:pptApp) {
+            while ($script:pptApp.SlideShowWindows.Count -gt 0) { $script:pptApp.SlideShowWindows.Item(1).View.Exit() }
+            if ($null -ne $script:masterPres) { $script:masterPres.Saved = -1; $script:masterPres.Close() }
+            if ($script:pptApp.Presentations.Count -eq 0) { $script:pptApp.Quit() }
+        }
+    } catch {}
+    $script:masterPres = $null; $script:pptApp = $null; $script:frozenTempSlide = 0
+}
+
 function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/init" -and $req.HttpMethod -eq "POST") {
         try {
-            $pres = Ensure-MasterPresentation $mediaDir
-            $ssWin = Start-StageSlideShow $pres
+            $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres
             Send-Json $res @{ ok = $true; slides = $pres.Slides.Count; current = if ($ssWin) { $ssWin.View.CurrentShowPosition } else { 1 } }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/save" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir
+            $safe = [System.IO.Path]::GetFileNameWithoutExtension($body.name) + ".pptx"
+            $dest = Join-Path $mediaDir $safe
+            $pres.SaveCopyAs($dest)
+            Send-Json $res @{ ok = $true; file = $safe }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/load" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $safe = [System.IO.Path]::GetFileName($body.file)
+            $src = Join-Path $mediaDir $safe
+            if (-not (Test-Path $src)) { throw "Saved PPTX not found: $safe" }
+            $app = Get-PptApp
+            while ($app.SlideShowWindows.Count -gt 0) { $app.SlideShowWindows.Item(1).View.Exit() }
+            if ($null -ne $script:masterPres) { $script:masterPres.Saved = -1; $script:masterPres.Close() }
+            $masterPath = Join-Path $mediaDir "_ShowMaster.pptx"
+            Copy-Item -Path $src -Destination $masterPath -Force
+            Unblock-File -Path $masterPath -ErrorAction SilentlyContinue
+            $script:masterPres = $app.Presentations.Open($masterPath, 0, 0, -1)
+            $ssWin = Start-StageSlideShow $script:masterPres
+            Send-Json $res @{ ok = $true; slides = $script:masterPres.Slides.Count }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/close" -and $req.HttpMethod -eq "POST") {
+        Close-PptCleanly
+        Send-Json $res @{ ok = $true }
         return $true
     }
 
@@ -87,12 +133,8 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
             $full = Join-Path $mediaDir $rel
             if ($rel.Contains("..") -or -not (Test-Path $full)) { throw "File not found: $rel" }
             $startIdx = $pres.Slides.Count + 1
-            if ($body.kind -eq "ppt") {
-                $added = $pres.Slides.InsertFromFile($full, $pres.Slides.Count, 1, -1)
-                $endIdx = $startIdx + $added - 1
-            } else {
-                $endIdx = Insert-MediaSlide $pres $full $body.kind
-            }
+            if ($body.kind -eq "ppt") { $added = $pres.Slides.InsertFromFile($full, $pres.Slides.Count, 1, -1); $endIdx = $startIdx + $added - 1 }
+            else { $endIdx = Insert-MediaSlide $pres $full $body.kind }
             Send-Json $res @{ ok = $true; startSlide = $startIdx; endSlide = $endIdx; total = $pres.Slides.Count }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
@@ -121,6 +163,7 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
             $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
             $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres; $view = $ssWin.View
             switch ($body.action) {
+                "focus"    { $ssWin.Activate() }
                 "next"     { $view.State = 1; $view.Next() }
                 "prev"     { $view.State = 1; $view.Previous() }
                 "goto"     { $view.State = 1; $view.GotoSlide([int]$body.slide) }

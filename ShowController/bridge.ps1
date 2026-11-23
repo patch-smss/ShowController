@@ -54,6 +54,8 @@ while ($listener.IsListening) {
 
         if ($rawPath -eq "/api/shutdown") {
             Send-Json $res @{ status = "stopping" }
+            if (Get-Command Close-PptCleanly -ErrorAction SilentlyContinue) { Close-PptCleanly }
+            Start-Sleep -Milliseconds 400
             DisplaySwitch.exe /clone
             Start-Sleep -Seconds 1
             Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like "*ShowControllerEdge*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

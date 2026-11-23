@@ -17,10 +17,22 @@ export async function ingestMediaFile(file, store) {
     store.addCue(file.name, 'audio', URL.createObjectURL(file));
     return;
   }
-  const res = await fetch('/api/upload-media', {
+  const up = await fetch('/api/upload-media', {
     method: 'POST',
     headers: { 'X-Filename': encodeURIComponent(file.name) },
     body: file
   });
-  if (res.ok) store.addCue(file.name, kind, file.name, { tempFile: true });
+  if (!up.ok) return;
+
+  const ins = await (await fetch('/api/ppt/insert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: file.name, kind })
+  })).json();
+
+  store.addCue(file.name, kind, file.name, {
+    tempFile: true,
+    startSlide: ins.ok ? ins.startSlide : null,
+    endSlide: ins.ok ? ins.endSlide : null
+  });
 }
