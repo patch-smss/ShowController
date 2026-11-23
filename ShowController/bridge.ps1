@@ -54,6 +54,7 @@ while ($listener.IsListening) {
 
         if ($rawPath -eq "/api/shutdown") {
             Send-Json $res @{ status = "stopping" }
+            if ([Type]::GetType("GlobalHotkeyHost")) { [GlobalHotkeyHost]::SetEnabled($false) }
             if (Get-Command Close-PptCleanly -ErrorAction SilentlyContinue) { Close-PptCleanly }
             Start-Sleep -Milliseconds 400
             DisplaySwitch.exe /clone
@@ -74,6 +75,7 @@ while ($listener.IsListening) {
         }
 
         if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-HotkeysApi -ErrorAction SilentlyContinue) { if (Handle-HotkeysApi $rawPath $req $res) { continue } }
         if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
