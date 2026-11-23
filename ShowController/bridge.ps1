@@ -2,9 +2,21 @@ Add-Type -AssemblyName System.Windows.Forms
 $Host.UI.RawUI.WindowTitle = "ShowBridge"
 $port = 8765
 
-. "$PSScriptRoot\ps\screens.ps1"
-. "$PSScriptRoot\ps\media-api.ps1"
-. "$PSScriptRoot\ps\remote-api.ps1"
+# Auto-load all backend API modules in ps\
+$psDir = Join-Path $PSScriptRoot "ps"
+if (Test-Path $psDir) {
+    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
+        . $_.FullName
+    }
+}
+
+# Ensure plugin zone folders exist
+$pluginsRoot = Join-Path $PSScriptRoot "plugins"
+$zones = @("slot-toolbar", "slot-cue-panel", "slot-stage-panel")
+foreach ($z in $zones) {
+    $zPath = Join-Path $pluginsRoot $z
+    if (!(Test-Path $zPath)) { New-Item -ItemType Directory -Path $zPath -Force | Out-Null }
+}
 
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://+:$port/")
@@ -48,9 +60,20 @@ while ($listener.IsListening) {
             break
         }
 
-        if (Handle-ScreensApi $rawPath $res) { continue }
-        if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue }
-        if (Handle-RemoteApi $rawPath $req $res) { continue }
+        if ($rawPath -eq "/api/plugins") {
+            $manifest = @{}
+            foreach ($z in $zones) {
+                $zPath = Join-Path $pluginsRoot $z
+                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)" })
+                $manifest[$z] = $files
+            }
+            Send-Json $res $manifest
+            continue
+        }
+
+        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
 
         if ($rawPath -eq "/") { $rawPath = "/control.html" }
         $rel = $rawPath.TrimStart('/').Replace('/', '\')
