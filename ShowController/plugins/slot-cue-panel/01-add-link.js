@@ -1,3 +1,4 @@
+// Manage YouTube/Canva link cues and external browser tabs
 const webTabs = new Map();
 
 function buildDirectUrl(cue) {
@@ -40,12 +41,6 @@ export function init(container, ctx) {
     if (cue.kind !== 'youtube' && cue.kind !== 'canva') return;
     const tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
     if (tab) webTabs.set(cue.id, tab);
-    ctx.actions.ensureProjectorOpen().then(() => {
-      setTimeout(() => {
-        const win = ctx.actions.getProjectorWin();
-        if (win && !win.closed) win.focus();
-      }, 300);
-    });
   });
 
   ctx.on('CUE_TRIGGER', ({ cue }) => {

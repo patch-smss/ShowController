@@ -1,0 +1,13 @@
+﻿{
+    "fadeMs":  1500,
+    "stopAudioOnVideo":  false,
+    "aspectRatio":  "16:9",
+    "imageFit":  "contain",
+    "confirmPrompts":  true,
+    "remotePin":  "0216",
+    "hotkeys":  {
+                    "prev":  38,
+                    "next":  40,
+                    "blackout":  190
+                }
+}

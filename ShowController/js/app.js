@@ -1,6 +1,8 @@
 import { store, channel } from '/js/store.js';
 import { playAudioCue, stopAudio } from '/js/audio-engine.js';
 
+// Core plugin loader, event bus, and cue execution orchestrator
+
 const listeners = new Map();
 
 const ctx = {
@@ -10,7 +12,8 @@ const ctx = {
     blackout: true,
     intermission: false,
     endAction: 'intermission',
-    audioPrefs: { fadeIn: true, fadeOut: true },
+    audioPrefs: { fadeIn: true, fadeOut: true, fadeMs: 1500 },
+    settings: { fadeMs: 1500, stopAudioOnVideo: false, aspectRatio: '16:9', imageFit: 'contain', confirmPrompts: true, remotePin: '' },
     finishedText: null
   },
   on(event, fn) {
@@ -44,12 +47,16 @@ export async function triggerCue(index) {
   ctx.emit('CUE_TRIGGER', { cue, index });
 
   if (cue.kind === 'audio') {
-    playAudioCue(cue, ctx.state.audioPrefs, () => {
+    playAudioCue(cue, { ...ctx.state.audioPrefs, fadeMs: ctx.state.settings.fadeMs }, () => {
       ctx.state.finishedText = '-- (Finished)';
       ctx.emit('STORE_UPDATED');
     });
     pptPost('/api/ppt/nav', { action: 'focus' }).catch(() => {});
     return;
+  }
+
+  if (cue.kind === 'video' && ctx.state.settings.stopAudioOnVideo) {
+    stopAudio(ctx.state.audioPrefs.fadeOut, ctx.state.settings.fadeMs);
   }
 
   if (cue.kind === 'youtube' || cue.kind === 'canva') return;
@@ -67,20 +74,19 @@ export async function triggerCue(index) {
 }
 
 export function nextCue() {
-  if (store.isAtEnd) return;
+  if (store.cues.length === 0) return;
+  if (store.isAtEnd) { store.isAtEnd = false; triggerCue(0); return; }
   const idx = store.getActiveIndex();
-  if (idx + 1 < store.cues.length) {
-    triggerCue(idx + 1);
-  } else if (store.cues.length > 0) {
-    store.isAtEnd = true;
-    ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction });
-  }
+  if (idx + 1 < store.cues.length) triggerCue(idx + 1);
+  else { store.isAtEnd = true; ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction }); }
 }
 
 export function prevCue() {
+  if (store.cues.length === 0) return;
   const idx = store.getActiveIndex();
-  if (store.isAtEnd && idx >= 0) return triggerCue(idx);
-  if (idx - 1 >= 0) triggerCue(idx - 1);
+  if (store.isAtEnd && idx >= 0) { store.isAtEnd = false; triggerCue(idx); return; }
+  if (idx <= 0) { triggerCue(store.cues.length - 1); return; }
+  triggerCue(idx - 1);
 }
 
 export async function openProjector() {
@@ -88,13 +94,11 @@ export async function openProjector() {
 }
 
 export async function endShow() {
-  if (!confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
+  if (ctx.state.settings.confirmPrompts && !confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
   if (confirm('Save a copy of the Master PowerPoint presentation (.pptx) before closing?')) {
     const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
     const name = prompt('Enter filename for Master PPTX (saved in Media folder):', defaultName);
-    if (name) {
-      await pptPost('/api/ppt/save', { name });
-    }
+    if (name) await pptPost('/api/ppt/save', { name });
   }
   stopAudio(false);
   ctx.emit('END_SHOW');
@@ -107,23 +111,19 @@ export async function endShow() {
 }
 
 ctx.actions = {
-  triggerCue,
-  nextCue,
-  prevCue,
-  openProjector,
-  endShow,
-  pptPost,
-  stopAudio,
+  triggerCue, nextCue, prevCue, openProjector, endShow, pptPost, stopAudio,
   ensureProjectorOpen: openProjector,
   getProjectorWin: () => null,
   closeWebWindow: () => fetch('/api/focus-browser').catch(() => {}),
-  preloadCue: (index) => {
-    const cue = store.cues[index];
-    if (cue) ctx.emit('CUE_PRELOAD', { cue, index });
-  }
+  preloadCue: (index) => { const cue = store.cues[index]; if (cue) ctx.emit('CUE_PRELOAD', { cue, index }); }
 };
 
 (async () => {
+  try {
+    const cfg = await (await fetch('/api/settings')).json();
+    Object.assign(ctx.state.settings, cfg);
+    ctx.state.audioPrefs.fadeMs = cfg.fadeMs ?? 1500;
+  } catch {}
   try {
     const manifest = await (await fetch('/api/plugins')).json();
     for (const [zoneId, urls] of Object.entries(manifest)) {
@@ -140,7 +140,7 @@ ctx.actions = {
   } catch (err) { console.error('Plugin manifest error:', err); }
 })();
 
-ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut));
+ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut, ctx.state.settings.fadeMs));
 ctx.on('PANIC', () => stopAudio(false));
 
 setInterval(async () => {

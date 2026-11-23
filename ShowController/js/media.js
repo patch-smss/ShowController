@@ -2,6 +2,8 @@ const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
 const AUD_EXTS = ['mp3', 'wav', 'ogg', 'm4a'];
 const VID_EXTS = ['mp4', 'mov', 'webm'];
 
+// Media type detector and auto-uploader/inserter for visual files
+
 export function detectMediaKind(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   if (IMG_EXTS.includes(ext)) return 'image';

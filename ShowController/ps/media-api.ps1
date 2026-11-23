@@ -1,3 +1,4 @@
+# Handle local file uploads (with Windows Unblock-File) and temp file cleanup
 function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/upload-media" -and $req.HttpMethod -eq "POST") {
         $relPath = [System.Uri]::UnescapeDataString($req.Headers["X-Filename"]).Replace('/', '\').TrimStart('\')

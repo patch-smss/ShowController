@@ -1,5 +1,7 @@
 export const channel = new BroadcastChannel('show_controller_bus');
 
+// Reactive cue list state container
+
 export const store = {
   cues: [],
   activeId: null,
