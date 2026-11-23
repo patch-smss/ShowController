@@ -83,6 +83,7 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
     if ($rawPath -eq "/api/ppt/init" -and $req.HttpMethod -eq "POST") {
         try {
             $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres
+            if (Get-Command Arrange-Monitor1Windows -ErrorAction SilentlyContinue) { Arrange-Monitor1Windows }
             Send-Json $res @{ ok = $true; slides = $pres.Slides.Count; current = if ($ssWin) { $ssWin.View.CurrentShowPosition } else { 1 } }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
@@ -114,6 +115,7 @@ function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
             Unblock-File -Path $masterPath -ErrorAction SilentlyContinue
             $script:masterPres = $app.Presentations.Open($masterPath, 0, 0, -1)
             $ssWin = Start-StageSlideShow $script:masterPres
+            if (Get-Command Arrange-Monitor1Windows -ErrorAction SilentlyContinue) { Arrange-Monitor1Windows }
             Send-Json $res @{ ok = $true; slides = $script:masterPres.Slides.Count }
         } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
         return $true
