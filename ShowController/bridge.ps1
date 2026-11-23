@@ -72,6 +72,7 @@ while ($listener.IsListening) {
         }
 
         if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
 
