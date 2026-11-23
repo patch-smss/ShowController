@@ -1,3 +1,13 @@
+async function syncPptBlackout(active) {
+  try {
+    await fetch('/api/ppt/nav', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'blackout', active })
+    });
+  } catch {}
+}
+
 export function init(container, ctx) {
   const blackBtn = document.createElement('button');
   blackBtn.id = 'btn-blackout';
@@ -22,13 +32,11 @@ export function init(container, ctx) {
     }
     syncButton();
     ctx.channel.postMessage({ type: 'BLACKOUT', active });
+    syncPptBlackout(active);
   };
 
   const triggerPanic = () => {
-    ctx.state.blackout = true;
-    ctx.state.intermission = false;
-    syncButton();
-    ctx.emit('SYNC_STAGE_BUTTONS');
+    setBlackout(true);
     ctx.channel.postMessage({ type: 'PANIC' });
     ctx.emit('PANIC');
   };
