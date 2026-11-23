@@ -82,7 +82,7 @@ while ($listener.IsListening) {
         if (Get-Command Handle-PptSlidesApi -ErrorAction SilentlyContinue) { if (Handle-PptSlidesApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-PptNavApi -ErrorAction SilentlyContinue)    { if (Handle-PptNavApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)     { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
-        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)    { if (Handle-RemoteApi $rawPath $req $res) { continue } }
+        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)    { if (Handle-RemoteApi $rawPath $req $res $mediaDir) { continue } }
 
         if ($rawPath -eq "/") { $rawPath = "/control.html" }
         $rel = $rawPath.TrimStart('/').Replace('/', '\')

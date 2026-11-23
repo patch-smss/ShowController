@@ -4,7 +4,7 @@
     "aspectRatio":  "16:9",
     "imageFit":  "contain",
     "confirmPrompts":  true,
-    "remotePin":  "",
+    "remotePin":  "0216",
     "hotkeys":  {
                     "prev":  38,
                     "next":  40,

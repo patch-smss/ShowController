@@ -1,3 +1,5 @@
+import { detectMediaKind } from '/js/media.js';
+
 export function init(container, ctx) {
   const box = document.createElement('div');
   box.className = 'control-box';
@@ -22,19 +24,8 @@ export function init(container, ctx) {
       box.querySelector('#qr-box').innerHTML = `<img src="${qrRes.url}" style="width:100%; height:100%; object-fit:contain;" alt="QR" />`;
       return;
     }
-
-    const script = document.createElement('script');
-    script.src = 'https://cloudflare.com';
-    script.onload = () => {
-      new window.QRCode(box.querySelector('#qr-box'), { text: url, width: 68, height: 68, correctLevel: window.QRCode.CorrectLevel.L });
-    };
-    script.onerror = () => {
-      box.querySelector('#qr-box').innerHTML = '<span style="color:#0f172a;font-size:10px;font-weight:700;text-align:center;">OPEN URL<br>ON PHONE</span>';
-    };
-    document.head.appendChild(script);
-  }).catch(() => {
-    box.querySelector('#remote-url').textContent = 'Offline';
-  });
+    box.querySelector('#qr-box').innerHTML = '<span style="color:#0f172a;font-size:10px;font-weight:700;text-align:center;">OPEN URL<br>ON PHONE</span>';
+  }).catch(() => { box.querySelector('#remote-url').textContent = 'Offline'; });
 
   setInterval(async () => {
     try {
@@ -42,6 +33,10 @@ export function init(container, ctx) {
       for (const cmd of cmds) {
         if (cmd.type === 'NEXT') ctx.actions.nextCue();
         if (cmd.type === 'PREV') ctx.actions.prevCue();
+        if (cmd.type === 'GOTO_PAGE' && cmd.page >= 1) {
+          ctx.emit('SET_BLACKOUT', { active: false });
+          ctx.actions.pptPost('/api/ppt/nav', { action: 'goto', slide: cmd.page + 1 });
+        }
         if (cmd.type === 'BLACKOUT') ctx.emit('TOGGLE_BLACKOUT');
         if (cmd.type === 'INTERMISSION') ctx.emit('TOGGLE_INTERMISSION');
         if (cmd.type === 'FREEZE') ctx.emit('TOGGLE_FREEZE');
@@ -52,6 +47,18 @@ export function init(container, ctx) {
         if (cmd.type === 'ADD_LINK' && cmd.url) {
           const kind = /youtu\.be\/|youtube\.com\//i.test(cmd.url) ? 'youtube' : 'canva';
           ctx.store.addCue(cmd.url, kind, cmd.url);
+          if (cmd.playNow) ctx.actions.triggerCue(ctx.store.cues.length - 1);
+        }
+        if (cmd.type === 'ADD_MEDIA' && cmd.file) {
+          const ext = cmd.file.split('.').pop().toLowerCase();
+          const kind = ['ppt', 'pptx'].includes(ext) ? 'ppt' : detectMediaKind(cmd.file);
+          if (!kind) continue;
+          if (kind === 'audio') {
+            ctx.store.addCue(cmd.file, 'audio', cmd.file, { tempFile: true });
+          } else {
+            const ins = await ctx.actions.pptPost('/api/ppt/insert', { file: cmd.file, kind });
+            ctx.store.addCue(cmd.file, kind, cmd.file, { tempFile: true, startSlide: ins.startSlide, endSlide: ins.endSlide });
+          }
           if (cmd.playNow) ctx.actions.triggerCue(ctx.store.cues.length - 1);
         }
       }
