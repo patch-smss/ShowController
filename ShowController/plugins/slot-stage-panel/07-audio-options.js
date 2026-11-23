@@ -8,14 +8,9 @@ export function init(container, ctx) {
     <button id="btn-stop-audio" style="background:#334155; width:100%; margin-top:8px;">Stop Audio Now</button>
   `;
 
-  const stopAudio = () => {
-    ctx.channel.postMessage({ type: 'STOP_AUDIO', fadeOut: ctx.state.audioPrefs.fadeOut });
-  };
-
   box.querySelector('#chk-fade-in').onchange = (e) => { ctx.state.audioPrefs.fadeIn = e.target.checked; };
   box.querySelector('#chk-fade-out').onchange = (e) => { ctx.state.audioPrefs.fadeOut = e.target.checked; };
-  box.querySelector('#btn-stop-audio').onclick = stopAudio;
+  box.querySelector('#btn-stop-audio').onclick = () => ctx.emit('STOP_AUDIO');
 
   container.appendChild(box);
-  ctx.on('STOP_AUDIO', stopAudio);
 }

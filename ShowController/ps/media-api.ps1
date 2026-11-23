@@ -8,6 +8,7 @@ function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
             $fs = [System.IO.File]::Create($destPath)
             $req.InputStream.CopyTo($fs)
             $fs.Close()
+            Unblock-File -Path $destPath -ErrorAction SilentlyContinue
             Send-Json $res @{ ok = $true }
         } else {
             $res.StatusCode = 400
@@ -23,26 +24,6 @@ function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
             if ($safe) { Remove-Item (Join-Path $mediaDir $safe) -Force -ErrorAction SilentlyContinue }
         }
         Send-Json $res @{ ok = $true }
-        return $true
-    }
-
-    if ($rawPath -eq "/api/ppt" -and $req.HttpMethod -eq "POST") {
-        $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
-        Get-Process powerpnt -ErrorAction SilentlyContinue | Stop-Process -Force
-        if ($body.action -eq "launch_ppt") {
-            Start-Sleep -Milliseconds 250
-            $rel = $body.file.Replace('/', '\').TrimStart('\')
-            $full = Join-Path $mediaDir $rel
-            if (-not $rel.Contains("..") -and (Test-Path $full) -and ($rel -like "*.ppt*")) {
-                Start-Process "powerpnt.exe" -ArgumentList "/S `"$full`""
-                Send-Json $res @{ status = "launched" }
-            } else {
-                $res.StatusCode = 404
-                Send-Json $res @{ error = "PowerPoint file not found." }
-            }
-        } else {
-            Send-Json $res @{ status = "closed" }
-        }
         return $true
     }
 

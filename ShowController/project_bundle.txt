@@ -1,0 +1,1717 @@
+﻿=== FILE: js\app.js ===
+import { store, channel } from '/js/store.js';
+import { playAudioCue, stopAudio } from '/js/audio-engine.js';
+
+const listeners = new Map();
+
+const ctx = {
+  store,
+  channel,
+  state: {
+    blackout: true,
+    intermission: false,
+    endAction: 'intermission',
+    audioPrefs: { fadeIn: true, fadeOut: true },
+    finishedText: null
+  },
+  on(event, fn) {
+    if (!listeners.has(event)) listeners.set(event, new Set());
+    listeners.get(event).add(fn);
+  },
+  emit(event, payload = {}) {
+    listeners.get(event)?.forEach(fn => {
+      try { fn(payload); } catch (err) { console.error(`Plugin error [${event}]:`, err); }
+    });
+  },
+  actions: {}
+};
+
+store.onChange = () => ctx.emit('STORE_UPDATED');
+
+async function pptPost(endpoint, body = {}) {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+export async function triggerCue(index) {
+  if (index < 0 || index >= store.cues.length) return;
+  const cue = store.cues[index];
+  ctx.state.finishedText = null;
+  store.setActive(cue.id);
+  ctx.emit('CUE_TRIGGER', { cue, index });
+
+  if (cue.kind === 'audio') {
+    playAudioCue(cue, ctx.state.audioPrefs, () => {
+      ctx.state.finishedText = '-- (Finished)';
+      ctx.emit('STORE_UPDATED');
+    });
+    pptPost('/api/ppt/nav', { action: 'focus' }).catch(() => {});
+    return;
+  }
+
+  if (cue.kind === 'youtube' || cue.kind === 'canva') return;
+
+  if (['ppt', 'image', 'video'].includes(cue.kind)) {
+    if (!cue.startSlide) {
+      const ins = await pptPost('/api/ppt/insert', { file: cue.src, kind: cue.kind });
+      if (ins.ok) { cue.startSlide = ins.startSlide; cue.endSlide = ins.endSlide; }
+    }
+    if (cue.startSlide) {
+      ctx.emit('SET_BLACKOUT', { active: false });
+      await pptPost('/api/ppt/nav', { action: 'goto', slide: cue.startSlide });
+    }
+  }
+}
+
+export function nextCue() {
+  if (store.isAtEnd) return;
+  const idx = store.getActiveIndex();
+  if (idx + 1 < store.cues.length) {
+    triggerCue(idx + 1);
+  } else if (store.cues.length > 0) {
+    store.isAtEnd = true;
+    ctx.emit('SHOW_ENDED', { endAction: ctx.state.endAction });
+  }
+}
+
+export function prevCue() {
+  const idx = store.getActiveIndex();
+  if (store.isAtEnd && idx >= 0) return triggerCue(idx);
+  if (idx - 1 >= 0) triggerCue(idx - 1);
+}
+
+export async function openProjector() {
+  await pptPost('/api/ppt/init');
+}
+
+export async function endShow() {
+  if (!confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
+  if (confirm('Save a copy of the Master PowerPoint presentation (.pptx) before closing?')) {
+    const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
+    const name = prompt('Enter filename for Master PPTX (saved in Media folder):', defaultName);
+    if (name) {
+      await pptPost('/api/ppt/save', { name });
+    }
+  }
+  stopAudio(false);
+  ctx.emit('END_SHOW');
+  await pptPost('/api/ppt/close');
+  const tempFiles = store.cues.filter(c => c.tempFile).map(c => c.src);
+  if (tempFiles.length > 0) {
+    try { await pptPost('/api/cleanup-temp', { files: tempFiles }); } catch {}
+  }
+  fetch('/api/shutdown').catch(() => {});
+}
+
+ctx.actions = {
+  triggerCue,
+  nextCue,
+  prevCue,
+  openProjector,
+  endShow,
+  pptPost,
+  stopAudio,
+  ensureProjectorOpen: openProjector,
+  getProjectorWin: () => null,
+  closeWebWindow: () => fetch('/api/focus-browser').catch(() => {}),
+  preloadCue: (index) => {
+    const cue = store.cues[index];
+    if (cue) ctx.emit('CUE_PRELOAD', { cue, index });
+  }
+};
+
+(async () => {
+  try {
+    const manifest = await (await fetch('/api/plugins')).json();
+    for (const [zoneId, urls] of Object.entries(manifest)) {
+      const container = document.getElementById(zoneId);
+      if (!container) continue;
+      for (const url of urls) {
+        try {
+          const mod = await import(url);
+          if (typeof mod.init === 'function') await mod.init(container, ctx);
+        } catch (err) { console.error(`Failed loading plugin ${url}:`, err); }
+      }
+    }
+    ctx.emit('STORE_UPDATED');
+  } catch (err) { console.error('Plugin manifest error:', err); }
+})();
+
+ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut));
+ctx.on('PANIC', () => stopAudio(false));
+
+setInterval(async () => {
+  try { if (!(await fetch('/api/screens')).ok) throw new Error(); }
+  catch { window.close(); }
+}, 1500);
+
+
+
+=== FILE: js\audio-engine.js ===
+let activeAudio = null;
+
+function fadeAudio(audioEl, targetVol, durationMs, onDone) {
+  if (audioEl._fadeTimer) clearInterval(audioEl._fadeTimer);
+  const steps = 25;
+  const stepTime = durationMs / steps;
+  const volStep = (targetVol - audioEl.volume) / steps;
+
+  audioEl._fadeTimer = setInterval(() => {
+    const nextVol = audioEl.volume + volStep;
+    if ((volStep > 0 && nextVol >= targetVol) || (volStep < 0 && nextVol <= targetVol)) {
+      audioEl.volume = targetVol;
+      clearInterval(audioEl._fadeTimer);
+      if (onDone) onDone();
+    } else {
+      audioEl.volume = Math.max(0, Math.min(1, nextVol));
+    }
+  }, stepTime);
+}
+
+export function stopAudio(useFadeOut = true) {
+  if (!activeAudio) return;
+  const old = activeAudio;
+  activeAudio = null;
+  if (useFadeOut && !old.paused) {
+    fadeAudio(old, 0, 1500, () => { old.pause(); old.remove(); });
+  } else {
+    if (old._fadeTimer) clearInterval(old._fadeTimer);
+    old.pause();
+    old.remove();
+  }
+}
+
+export function playAudioCue(cue, prefs = { fadeIn: true, fadeOut: true }, onEnded = null) {
+  stopAudio(prefs.fadeOut);
+  const mediaUrl = cue.src.startsWith('blob:')
+    ? cue.src
+    : '/Media/' + cue.src.split('/').map(encodeURIComponent).join('/');
+
+  const audio = document.createElement('audio');
+  audio.src = mediaUrl;
+  audio.volume = prefs.fadeIn ? 0 : 1;
+  audio.onended = () => {
+    if (activeAudio === audio) activeAudio = null;
+    audio.remove();
+    if (onEnded) onEnded();
+  };
+  document.body.appendChild(audio);
+  audio.play().catch(err => console.warn('Audio playback blocked:', err));
+  activeAudio = audio;
+  if (prefs.fadeIn) fadeAudio(audio, 1, 1500);
+}
+
+
+
+=== FILE: js\media.js ===
+const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
+const AUD_EXTS = ['mp3', 'wav', 'ogg', 'm4a'];
+const VID_EXTS = ['mp4', 'mov', 'webm'];
+
+export function detectMediaKind(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  if (IMG_EXTS.includes(ext)) return 'image';
+  if (AUD_EXTS.includes(ext)) return 'audio';
+  if (VID_EXTS.includes(ext)) return 'video';
+  return null;
+}
+
+export async function ingestMediaFile(file, store) {
+  const kind = detectMediaKind(file.name);
+  if (!kind) return;
+  if (kind === 'audio') {
+    store.addCue(file.name, 'audio', URL.createObjectURL(file));
+    return;
+  }
+  const up = await fetch('/api/upload-media', {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent(file.name) },
+    body: file
+  });
+  if (!up.ok) return;
+
+  const ins = await (await fetch('/api/ppt/insert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: file.name, kind })
+  })).json();
+
+  store.addCue(file.name, kind, file.name, {
+    tempFile: true,
+    startSlide: ins.ok ? ins.startSlide : null,
+    endSlide: ins.ok ? ins.endSlide : null
+  });
+}
+
+
+
+=== FILE: js\store.js ===
+export const channel = new BroadcastChannel('show_controller_bus');
+
+export const store = {
+  cues: [],
+  activeId: null,
+  isAtEnd: false,
+  onChange: null,
+
+  notify() {
+    if (typeof this.onChange === 'function') this.onChange();
+  },
+
+  getActiveIndex() {
+    if (!this.activeId) return -1;
+    return this.cues.findIndex(c => c.id === this.activeId);
+  },
+
+  addCue(name, kind, src, extra = {}) {
+    this.cues.push({ id: crypto.randomUUID(), name, kind, src, ...extra });
+    this.notify();
+  },
+
+  duplicateCue(index) {
+    const orig = this.cues[index];
+    if (!orig) return;
+    this.cues.push({ ...orig, id: crypto.randomUUID() });
+    this.notify();
+  },
+
+  removeCue(index) {
+    if (this.cues[index]?.id === this.activeId) this.activeId = null;
+    this.cues.splice(index, 1);
+    this.notify();
+  },
+
+  moveCue(fromIndex, toIndex) {
+    if (fromIndex === null || fromIndex === toIndex) return;
+    const [moved] = this.cues.splice(fromIndex, 1);
+    this.cues.splice(toIndex, 0, moved);
+    this.notify();
+  },
+
+  clearAll() {
+    this.cues = [];
+    this.activeId = null;
+    this.isAtEnd = false;
+    this.notify();
+  },
+
+  setActive(id) {
+    this.activeId = id;
+    this.isAtEnd = false;
+    this.notify();
+  }
+};
+
+
+
+=== FILE: plugins\slot-cue-panel\01-add-link.js ===
+const webTabs = new Map();
+
+function buildDirectUrl(cue) {
+  if (cue.kind === 'youtube') {
+    const match = cue.src.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/))([^&?#/]+)/);
+    const vidId = match ? match.at(1) : null;
+    if (vidId && (cue.end || cue.loop)) {
+      let params = 'autoplay=1&rel=0';
+      if (cue.start) params += `&start=${parseInt(cue.start, 10)}`;
+      if (cue.end) params += `&end=${parseInt(cue.end, 10)}`;
+      if (cue.loop) params += `&loop=1&playlist=${vidId}`;
+      return `https://youtube.com{vidId}?${params}`;
+    }
+    let url = cue.src;
+    if (cue.start) url += `${url.includes('?') ? '&' : '?'}t=${parseInt(cue.start, 10)}s`;
+    return url;
+  }
+  return cue.src;
+}
+
+export function init(container, ctx) {
+  const row = document.createElement('div');
+  row.className = 'toolbar-row';
+  row.innerHTML = `
+    <input type="text" id="url-input" placeholder="Paste YouTube or Canva link..." />
+    <button id="btn-add-url">+ Add Link</button>
+  `;
+  container.appendChild(row);
+
+  row.querySelector('#btn-add-url').onclick = () => {
+    const input = row.querySelector('#url-input');
+    const rawUrl = input.value.trim();
+    if (!rawUrl) return;
+    const kind = /youtu\.be\/|youtube\.com\//i.test(rawUrl) ? 'youtube' : 'canva';
+    ctx.store.addCue(rawUrl, kind, rawUrl);
+    input.value = '';
+  };
+
+  ctx.on('CUE_PRELOAD', ({ cue }) => {
+    if (cue.kind !== 'youtube' && cue.kind !== 'canva') return;
+    const tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
+    if (tab) webTabs.set(cue.id, tab);
+    ctx.actions.ensureProjectorOpen().then(() => {
+      setTimeout(() => {
+        const win = ctx.actions.getProjectorWin();
+        if (win && !win.closed) win.focus();
+      }, 300);
+    });
+  });
+
+  ctx.on('CUE_TRIGGER', ({ cue }) => {
+    if (cue.kind !== 'youtube' && cue.kind !== 'canva') return;
+    let tab = webTabs.get(cue.id);
+    if (tab && !tab.closed) tab.focus();
+    else {
+      tab = window.open(buildDirectUrl(cue), 'tab_' + cue.id);
+      if (tab) webTabs.set(cue.id, tab);
+    }
+  });
+
+  ctx.on('END_SHOW', () => {
+    webTabs.forEach(tab => { try { if (tab && !tab.closed) tab.close(); } catch {} });
+    webTabs.clear();
+  });
+}
+
+
+
+=== FILE: plugins\slot-cue-panel\02-cue-list.js ===
+let dragSrcIndex = null;
+
+export function init(container, ctx) {
+  const list = document.createElement('div');
+  list.id = 'cue-list';
+  container.appendChild(list);
+
+  list.ondragover = (e) => e.preventDefault();
+  list.ondrop = (e) => {
+    if (e.target === list && dragSrcIndex !== null) {
+      ctx.store.moveCue(dragSrcIndex, ctx.store.cues.length - 1);
+      dragSrcIndex = null;
+    }
+  };
+
+  const render = () => {
+    list.innerHTML = '';
+    ctx.store.cues.forEach((cue, i) => {
+      const div = document.createElement('div');
+      div.className = 'cue-item' + (cue.id === ctx.store.activeId ? ' active' : '');
+      div.draggable = true;
+
+      const label = document.createElement('div');
+      label.className = 'cue-label';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = cue.kind;
+      label.appendChild(badge);
+      label.appendChild(document.createTextNode(cue.name));
+
+      const actions = document.createElement('div');
+      actions.style.flexShrink = '0';
+
+      const goBtn = document.createElement('button');
+      goBtn.textContent = 'Go';
+      goBtn.onclick = () => ctx.actions.triggerCue(i);
+      actions.appendChild(goBtn);
+
+      if (cue.kind === 'youtube' || cue.kind === 'canva') {
+        const preBtn = document.createElement('button');
+        preBtn.textContent = 'Pre-load';
+        preBtn.style.cssText = 'background:#6d28d9; margin-left:4px;';
+        preBtn.onclick = () => ctx.actions.preloadCue(i);
+        actions.appendChild(preBtn);
+      }
+
+      const dupBtn = document.createElement('button');
+      dupBtn.textContent = 'Dup';
+      dupBtn.style.marginLeft = '4px';
+      dupBtn.onclick = () => ctx.store.duplicateCue(i);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn-danger';
+      delBtn.textContent = 'X';
+      delBtn.onclick = () => ctx.store.removeCue(i);
+
+      actions.appendChild(dupBtn);
+      actions.appendChild(delBtn);
+      div.appendChild(label);
+      div.appendChild(actions);
+
+      div.ondragstart = () => { dragSrcIndex = i; };
+      div.ondragover = (e) => e.preventDefault();
+      div.ondrop = (e) => {
+        e.stopPropagation();
+        ctx.store.moveCue(dragSrcIndex, i);
+        dragSrcIndex = null;
+      };
+      list.appendChild(div);
+    });
+  };
+
+  ctx.on('STORE_UPDATED', render);
+}
+
+
+
+=== FILE: plugins\slot-cue-top\01-now-next.js ===
+export function init(container, ctx) {
+  const strip = document.createElement('div');
+  strip.className = 'preview-strip';
+  strip.innerHTML = `
+    <div class="preview-card"><span>Now Live</span><strong id="now-title">--</strong></div>
+    <div class="preview-card"><span>Next Up</span><strong id="next-title" style="color:#a3e635">--</strong></div>
+  `;
+  container.appendChild(strip);
+
+  const nowEl = strip.querySelector('#now-title');
+  const nextEl = strip.querySelector('#next-title');
+
+  const refresh = () => {
+    const idx = ctx.store.getActiveIndex();
+    nowEl.textContent = ctx.state.finishedText || (ctx.store.cues[idx] ? ctx.store.cues[idx].name : '--');
+    nextEl.textContent = ctx.store.cues[idx + 1] ? ctx.store.cues[idx + 1].name : 'End of Show';
+  };
+
+  ctx.on('STORE_UPDATED', refresh);
+  ctx.on('SHOW_ENDED', ({ endAction }) => {
+    if (endAction === 'intermission') nowEl.textContent = 'Intermission / Backdrop';
+    if (endAction === 'blackout') nowEl.textContent = 'Blackout';
+  });
+}
+
+
+
+=== FILE: plugins\slot-cue-top\02-dropzone.js ===
+import { ingestMediaFile } from '/js/media.js';
+
+export function init(container, ctx) {
+  const dz = document.createElement('div');
+  dz.id = 'dropzone';
+  dz.textContent = 'Drag & drop any Image, Audio, or Video file';
+  container.appendChild(dz);
+
+  dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('drag'); };
+  dz.ondragleave = () => dz.classList.remove('drag');
+  dz.ondrop = async (e) => {
+    e.preventDefault();
+    dz.classList.remove('drag');
+    for (const file of e.dataTransfer.files) await ingestMediaFile(file, ctx.store);
+  };
+}
+
+
+
+=== FILE: plugins\slot-header-actions\01-clear-list.js ===
+export function init(container, ctx) {
+  const btn = document.createElement('button');
+  btn.id = 'btn-clear';
+  btn.textContent = 'Clear';
+  btn.style.background = '#7f1d1d';
+  btn.onclick = () => {
+    if (ctx.store.cues.length === 0) return;
+    if (!confirm('Clear all cues from the list?')) return;
+    ctx.store.clearAll();
+  };
+  container.appendChild(btn);
+}
+
+
+
+=== FILE: plugins\slot-header-actions\02-save-load.js ===
+export function init(container, ctx) {
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = 'Save';
+  saveBtn.style.cssText = 'background:#0369a1; margin-right:4px;';
+
+  const loadBtn = document.createElement('button');
+  loadBtn.textContent = 'Load';
+  loadBtn.style.cssText = 'background:#334155; margin-right:4px;';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json';
+  fileInput.style.display = 'none';
+
+  saveBtn.onclick = async () => {
+    const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
+    const name = prompt('Save show name (saves .json cue list + Master .pptx):', defaultName);
+    if (!name) return;
+
+    const pptRes = await ctx.actions.pptPost('/api/ppt/save', { name });
+    const payload = {
+      masterPptx: pptRes.ok ? pptRes.file : null,
+      cues: ctx.store.cues.map(({ tempFile, ...rest }) => rest)
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${name.replace(/\.json$/i, '')}.json`;
+    a.click();
+  };
+
+  loadBtn.onclick = () => fileInput.click();
+  fileInput.onchange = (e) => {
+    const file = e.target.files.item(0);
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const cues = Array.isArray(parsed) ? parsed : parsed.cues;
+        if (!Array.isArray(cues)) throw new Error();
+        if (parsed.masterPptx) {
+          await ctx.actions.pptPost('/api/ppt/load', { file: parsed.masterPptx });
+        }
+        ctx.store.cues = cues;
+        ctx.store.activeId = null;
+        ctx.store.isAtEnd = false;
+        ctx.store.notify();
+      } catch {
+        alert('Invalid show file.');
+      }
+    };
+    reader.readAsText(file);
+    fileInput.value = '';
+  };
+
+  container.insertBefore(fileInput, container.firstChild);
+  container.insertBefore(loadBtn, container.firstChild);
+  container.insertBefore(saveBtn, container.firstChild);
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\01-nav-cues.js ===
+export function init(container, ctx) {
+  const nextBtn = document.createElement('button');
+  nextBtn.id = 'btn-next';
+  nextBtn.className = 'btn-go';
+  nextBtn.textContent = 'NEXT CUE (Space / Right)';
+  nextBtn.onclick = () => ctx.actions.nextCue();
+
+  const prevBtn = document.createElement('button');
+  prevBtn.id = 'btn-prev';
+  prevBtn.textContent = 'PREVIOUS CUE (Left)';
+  prevBtn.onclick = () => ctx.actions.prevCue();
+
+  container.appendChild(nextBtn);
+  container.appendChild(prevBtn);
+
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) {
+      e.preventDefault();
+      document.activeElement?.blur();
+      ctx.actions.nextCue();
+    }
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) {
+      e.preventDefault();
+      ctx.actions.prevCue();
+    }
+  });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\02-focus-stage.js ===
+export function init(container, ctx) {
+  const focusBtn = document.createElement('button');
+  focusBtn.id = 'btn-open-proj';
+  focusBtn.className = 'btn-proj';
+  focusBtn.textContent = 'Focus / Launch Stage';
+  focusBtn.onclick = () => ctx.actions.openProjector();
+
+  const backTabBtn = document.createElement('button');
+  backTabBtn.id = 'btn-close-web';
+  backTabBtn.style.cssText = 'background:#475569; font-size:12px;';
+  backTabBtn.textContent = 'Back to Projector Tab (W)';
+  backTabBtn.onclick = () => ctx.actions.closeWebWindow();
+
+  container.appendChild(focusBtn);
+  container.appendChild(backTabBtn);
+
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key.toLowerCase() === 'p') { e.preventDefault(); ctx.actions.openProjector(); }
+    if (e.key.toLowerCase() === 'w') { e.preventDefault(); ctx.actions.closeWebWindow(); }
+  });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\03-freeze.js ===
+let isFrozen = false;
+
+export function init(container, ctx) {
+  const btn = document.createElement('button');
+  btn.id = 'btn-freeze';
+  btn.textContent = 'FREEZE (F)';
+
+  const toggleFreeze = async () => {
+    isFrozen = !isFrozen;
+    btn.textContent = isFrozen ? 'UNFREEZE (F)' : 'FREEZE (F)';
+    btn.style.background = isFrozen ? '#0284c7' : '';
+    ctx.channel.postMessage({ type: 'FREEZE', active: isFrozen });
+    try {
+      await fetch('/api/ppt/nav', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'freeze', active: isFrozen })
+      });
+    } catch {}
+  };
+
+  btn.onclick = toggleFreeze;
+  container.appendChild(btn);
+
+  ctx.on('TOGGLE_FREEZE', toggleFreeze);
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key.toLowerCase() === 'f') toggleFreeze();
+  });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\04-blackout-panic.js ===
+async function syncPptBlackout(active) {
+  try {
+    await fetch('/api/ppt/nav', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'blackout', active })
+    });
+  } catch {}
+}
+
+export function init(container, ctx) {
+  const blackBtn = document.createElement('button');
+  blackBtn.id = 'btn-blackout';
+  blackBtn.className = 'btn-black active';
+  blackBtn.textContent = 'BLACKOUT: ON (B)';
+
+  const panicBtn = document.createElement('button');
+  panicBtn.id = 'btn-panic';
+  panicBtn.className = 'btn-panic';
+  panicBtn.textContent = 'PANIC / EMERGENCY BLACKOUT';
+
+  const syncButton = () => {
+    blackBtn.textContent = 'BLACKOUT: ' + (ctx.state.blackout ? 'ON (B)' : 'OFF (B)');
+    blackBtn.classList.toggle('active', ctx.state.blackout);
+  };
+
+  const setBlackout = (active) => {
+    ctx.state.blackout = active;
+    if (active) {
+      ctx.state.intermission = false;
+      ctx.emit('SYNC_STAGE_BUTTONS');
+    }
+    syncButton();
+    ctx.channel.postMessage({ type: 'BLACKOUT', active });
+    syncPptBlackout(active);
+  };
+
+  const triggerPanic = () => {
+    setBlackout(true);
+    ctx.channel.postMessage({ type: 'PANIC' });
+    ctx.emit('PANIC');
+  };
+
+  blackBtn.onclick = () => setBlackout(!ctx.state.blackout);
+  panicBtn.onclick = triggerPanic;
+
+  container.appendChild(blackBtn);
+  container.appendChild(panicBtn);
+
+  ctx.on('SET_BLACKOUT', ({ active }) => setBlackout(active));
+  ctx.on('TOGGLE_BLACKOUT', () => setBlackout(!ctx.state.blackout));
+  ctx.on('TRIGGER_PANIC', triggerPanic);
+  ctx.on('SYNC_STAGE_BUTTONS', syncButton);
+  ctx.on('SHOW_ENDED', ({ endAction }) => {
+    if (endAction === 'blackout') setBlackout(true);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key.toLowerCase() === 'b' || e.key === '.') setBlackout(!ctx.state.blackout);
+  });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\05-intermission.js ===
+export function init(container, ctx) {
+  const interBtn = document.createElement('button');
+  interBtn.id = 'btn-intermission';
+  interBtn.className = 'btn-inter';
+  interBtn.textContent = 'INTERMISSION (I)';
+
+  const bgBtn = document.createElement('button');
+  bgBtn.id = 'btn-set-intermission';
+  bgBtn.style.cssText = 'background:#334155; font-size:12px;';
+  bgBtn.textContent = 'Set Intermission / Backdrop Image...';
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = 'image/*';
+  picker.style.display = 'none';
+
+  const syncButton = () => {
+    interBtn.classList.toggle('active', ctx.state.intermission);
+  };
+
+  const setIntermission = (active) => {
+    ctx.state.intermission = active;
+    if (active) {
+      ctx.state.blackout = false;
+      ctx.emit('SYNC_STAGE_BUTTONS');
+    }
+    syncButton();
+    ctx.channel.postMessage({ type: 'INTERMISSION', active });
+  };
+
+  interBtn.onclick = () => setIntermission(!ctx.state.intermission);
+  bgBtn.onclick = () => picker.click();
+  picker.onchange = () => {
+    const file = picker.files.item(0);
+    if (!file) return;
+    ctx.channel.postMessage({ type: 'SET_INTERMISSION_IMG', url: URL.createObjectURL(file) });
+    bgBtn.textContent = 'Backdrop: ' + file.name;
+    picker.value = '';
+  };
+
+  container.appendChild(interBtn);
+  container.appendChild(bgBtn);
+  container.appendChild(picker);
+
+  ctx.on('CUE_TRIGGER', () => setIntermission(false));
+  ctx.on('TOGGLE_INTERMISSION', () => setIntermission(!ctx.state.intermission));
+  ctx.on('SYNC_STAGE_BUTTONS', syncButton);
+  ctx.on('SHOW_ENDED', ({ endAction }) => {
+    if (endAction === 'intermission') setIntermission(true);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key.toLowerCase() === 'i') setIntermission(!ctx.state.intermission);
+  });
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\06-end-action.js ===
+export function init(container, ctx) {
+  const box = document.createElement('div');
+  box.className = 'control-box';
+  box.innerHTML = `
+    <strong style="font-size:11px; color:#94a3b8; text-transform:uppercase; display:block; margin-bottom:6px;">After Last Cue (End of Show)</strong>
+    <select id="sel-end-action" style="width:100%;">
+      <option value="stay">Stay on Current Screen</option>
+      <option value="intermission" selected>Show Intermission / Backdrop</option>
+      <option value="blackout">Go to Blackout</option>
+    </select>
+  `;
+  box.querySelector('#sel-end-action').onchange = (e) => {
+    ctx.state.endAction = e.target.value;
+  };
+  container.appendChild(box);
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\07-audio-options.js ===
+export function init(container, ctx) {
+  const box = document.createElement('div');
+  box.className = 'control-box';
+  box.innerHTML = `
+    <strong style="font-size:11px; color:#94a3b8; text-transform:uppercase;">Audio Options (1.5s Fade)</strong>
+    <label><input type="checkbox" id="chk-fade-in" checked> Fade In on Start</label>
+    <label><input type="checkbox" id="chk-fade-out" checked> Fade Out on Stop / Next</label>
+    <button id="btn-stop-audio" style="background:#334155; width:100%; margin-top:8px;">Stop Audio Now</button>
+  `;
+
+  box.querySelector('#chk-fade-in').onchange = (e) => { ctx.state.audioPrefs.fadeIn = e.target.checked; };
+  box.querySelector('#chk-fade-out').onchange = (e) => { ctx.state.audioPrefs.fadeOut = e.target.checked; };
+  box.querySelector('#btn-stop-audio').onclick = () => ctx.emit('STOP_AUDIO');
+
+  container.appendChild(box);
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\08-remote.js ===
+export function init(container, ctx) {
+  const box = document.createElement('div');
+  box.className = 'control-box';
+  box.style.cssText = 'display:flex; align-items:center; gap:10px;';
+  box.innerHTML = `
+    <div id="qr-box" style="background:#fff; padding:4px; border-radius:6px; width:76px; height:76px; display:flex; align-items:center; justify-content:center; flex-shrink:0;"></div>
+    <div style="font-size:12px; line-height:1.4; overflow:hidden; flex:1;">
+      <strong style="color:#38bdf8;">Wi-Fi Phone Remote</strong><br>
+      <span id="remote-url" style="color:#94a3b8; word-break:break-all;">Connecting...</span><br>
+      <button id="btn-copy-remote" style="margin-top:4px; padding:3px 8px; font-size:11px; background:#334155;">Copy Link</button>
+    </div>
+  `;
+  container.appendChild(box);
+
+  fetch('/api/info').then(r => r.json()).then(data => {
+    const url = `http://${data.ip}:${data.port}/remote.html`;
+    box.querySelector('#remote-url').textContent = url;
+    box.querySelector('#btn-copy-remote').onclick = () => navigator.clipboard?.writeText(url);
+
+    const script = document.createElement('script');
+    script.src = 'https://cloudflare.com';
+    script.onload = () => {
+      new window.QRCode(box.querySelector('#qr-box'), { text: url, width: 68, height: 68, correctLevel: window.QRCode.CorrectLevel.L });
+    };
+    script.onerror = () => {
+      box.querySelector('#qr-box').innerHTML = '<span style="color:#0f172a;font-size:10px;font-weight:700;text-align:center;">OPEN URL<br>ON PHONE</span>';
+    };
+    document.head.appendChild(script);
+  }).catch(() => {
+    box.querySelector('#remote-url').textContent = 'Offline';
+  });
+
+  setInterval(async () => {
+    try {
+      const cmds = await (await fetch('/api/poll')).json();
+      for (const cmd of cmds) {
+        if (cmd.type === 'NEXT') ctx.actions.nextCue();
+        if (cmd.type === 'PREV') ctx.actions.prevCue();
+        if (cmd.type === 'BLACKOUT') ctx.emit('TOGGLE_BLACKOUT');
+        if (cmd.type === 'INTERMISSION') ctx.emit('TOGGLE_INTERMISSION');
+        if (cmd.type === 'FREEZE') ctx.emit('TOGGLE_FREEZE');
+        if (cmd.type === 'STOP_AUDIO') ctx.emit('STOP_AUDIO');
+        if (cmd.type === 'BACK_PROJ_TAB') ctx.actions.closeWebWindow();
+        if (cmd.type === 'FOCUS_PROJ') ctx.actions.openProjector();
+        if (cmd.type === 'PANIC') ctx.emit('TRIGGER_PANIC');
+        if (cmd.type === 'ADD_LINK' && cmd.url) {
+          const kind = /youtu\.be\/|youtube\.com\//i.test(cmd.url) ? 'youtube' : 'canva';
+          ctx.store.addCue(cmd.url, kind, cmd.url);
+          if (cmd.playNow) ctx.actions.triggerCue(ctx.store.cues.length - 1);
+        }
+      }
+    } catch {}
+  }, 600);
+}
+
+
+
+=== FILE: plugins\slot-stage-panel\09-end-show.js ===
+export function init(container, ctx) {
+  const btn = document.createElement('button');
+  btn.id = 'btn-end-show';
+  btn.className = 'btn-danger';
+  btn.style.cssText = 'margin-top:auto; padding:12px;';
+  btn.textContent = 'End Show & Exit';
+  btn.onclick = () => ctx.actions.endShow();
+  container.appendChild(btn);
+}
+
+
+
+=== FILE: plugins\slot-toolbar\01-brose-media.js ===
+import { ingestMediaFile } from '/js/media.js';
+
+export function init(container, ctx) {
+  const btn = document.createElement('button');
+  btn.textContent = '+ Browse Media';
+  btn.style.cssText = 'background:#0284c7; flex:1;';
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.multiple = true;
+  picker.accept = 'image/*,audio/*,video/*';
+  picker.style.display = 'none';
+
+  btn.onclick = () => picker.click();
+  picker.onchange = async () => {
+    for (const file of picker.files) await ingestMediaFile(file, ctx.store);
+    picker.value = '';
+  };
+
+  container.appendChild(btn);
+  container.appendChild(picker);
+}
+
+
+
+=== FILE: plugins\slot-toolbar\02-ppt-import.js ===
+export function init(container, ctx) {
+  const btn = document.createElement('button');
+  btn.textContent = '+ PowerPoint';
+  btn.style.background = '#b45309';
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.ppt,.pptx';
+  input.style.display = 'none';
+
+  btn.onclick = () => input.click();
+  input.onchange = async () => {
+    for (const file of input.files) {
+      const res = await fetch('/api/upload-media', {
+        method: 'POST',
+        headers: { 'X-Filename': encodeURIComponent(file.name) },
+        body: file
+      });
+      if (res.ok) ctx.store.addCue(file.name, 'ppt', file.name, { tempFile: true });
+      else alert('Failed to copy PowerPoint file to Media folder.');
+    }
+    input.value = '';
+  };
+
+  container.appendChild(btn);
+  container.appendChild(input);
+}
+
+
+
+=== FILE: ps\media-api.ps1 ===
+function Handle-MediaApi($rawPath, $req, $res, $mediaDir) {
+    if ($rawPath -eq "/api/upload-media" -and $req.HttpMethod -eq "POST") {
+        $relPath = [System.Uri]::UnescapeDataString($req.Headers["X-Filename"]).Replace('/', '\').TrimStart('\')
+        if ($relPath -and -not $relPath.Contains("..")) {
+            $destPath = Join-Path $mediaDir $relPath
+            $parent = Split-Path $destPath -Parent
+            if (!(Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            $fs = [System.IO.File]::Create($destPath)
+            $req.InputStream.CopyTo($fs)
+            $fs.Close()
+            Unblock-File -Path $destPath -ErrorAction SilentlyContinue
+            Send-Json $res @{ ok = $true }
+        } else {
+            $res.StatusCode = 400
+            Send-Json $res @{ error = "Invalid path" }
+        }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/cleanup-temp" -and $req.HttpMethod -eq "POST") {
+        $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+        foreach ($f in $body.files) {
+            $safe = [System.IO.Path]::GetFileName($f)
+            if ($safe) { Remove-Item (Join-Path $mediaDir $safe) -Force -ErrorAction SilentlyContinue }
+        }
+        Send-Json $res @{ ok = $true }
+        return $true
+    }
+
+    return $false
+}
+
+
+
+=== FILE: ps\ppt-com.ps1 ===
+$script:pptApp = $null
+$script:masterPres = $null
+$script:frozenTempSlide = 0
+
+function Get-PptApp {
+    if ($null -ne $script:pptApp) {
+        try { $null = $script:pptApp.Version; return $script:pptApp } catch { $script:pptApp = $null }
+    }
+    try { $script:pptApp = [Runtime.InteropServices.Marshal]::GetActiveObject("PowerPoint.Application") }
+    catch { $script:pptApp = New-Object -ComObject PowerPoint.Application }
+    $script:pptApp.Visible = -1
+    return $script:pptApp
+}
+
+function Ensure-MasterPresentation($mediaDir) {
+    $app = Get-PptApp
+    $masterPath = Join-Path $mediaDir "_ShowMaster.pptx"
+    if ($null -ne $script:masterPres) {
+        try { $null = $script:masterPres.Slides.Count; return $script:masterPres } catch { $script:masterPres = $null }
+    }
+    foreach ($p in $app.Presentations) {
+        if ($p.FullName -eq $masterPath) { $script:masterPres = $p; break }
+    }
+    if ($null -eq $script:masterPres) {
+        $script:masterPres = $app.Presentations.Add(-1)
+        $script:masterPres.PageSetup.SlideSize = 16
+        $s1 = $script:masterPres.Slides.Add(1, 12)
+        $s1.FollowMasterBackground = 0; $s1.Background.Fill.Solid(); $s1.Background.Fill.ForeColor.RGB = 0
+        $script:masterPres.SaveAs($masterPath)
+    }
+    return $script:masterPres
+}
+
+function Start-StageSlideShow($pres) {
+    $app = Get-PptApp
+    $sec = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+    if ($app.SlideShowWindows.Count -eq 0) {
+        $pres.SlideShowSettings.ShowType = 1
+        $pres.SlideShowSettings.LoopUntilStopped = 0
+        $pres.SlideShowSettings.ShowWithNarration = -1
+        $pres.SlideShowSettings.ShowWithAnimation = -1
+        $ssWin = $pres.SlideShowSettings.Run()
+    } else { $ssWin = $app.SlideShowWindows.Item(1) }
+    if ($sec -and $ssWin) {
+        $ssWin.Left = [float]($sec.Bounds.X * 0.75); $ssWin.Top = [float]($sec.Bounds.Y * 0.75)
+        $ssWin.Width = [float]($sec.Bounds.Width * 0.75); $ssWin.Height = [float]($sec.Bounds.Height * 0.75)
+    }
+    return $ssWin
+}
+
+function Insert-MediaSlide($pres, $fullPath, $kind) {
+    $idx = $pres.Slides.Count + 1
+    $sl = $pres.Slides.Add($idx, 12)
+    $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
+    $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
+    if ($kind -eq "image") {
+        $shp = $sl.Shapes.AddPicture($fullPath, 0, -1, 0, 0)
+        $shp.LockAspectRatio = -1
+        $scale = [Math]::Min($sw / $shp.Width, $sh / $shp.Height)
+        $shp.Width = $shp.Width * $scale
+        $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
+    } elseif ($kind -eq "video") {
+        $shp = $sl.Shapes.AddMediaObject2($fullPath, 0, -1, 0, 0, $sw, $sh)
+        $shp.AnimationSettings.PlaySettings.PlayOnEntry = -1
+        $shp.AnimationSettings.PlaySettings.PauseAnimation = 0
+        $shp.AnimationSettings.PlaySettings.HideWhileNotPlaying = -1
+    }
+    return $idx
+}
+
+function Close-PptCleanly {
+    try {
+        if ($null -ne $script:pptApp) {
+            while ($script:pptApp.SlideShowWindows.Count -gt 0) { $script:pptApp.SlideShowWindows.Item(1).View.Exit() }
+            if ($null -ne $script:masterPres) { $script:masterPres.Saved = -1; $script:masterPres.Close() }
+            if ($script:pptApp.Presentations.Count -eq 0) { $script:pptApp.Quit() }
+        }
+    } catch {}
+    $script:masterPres = $null; $script:pptApp = $null; $script:frozenTempSlide = 0
+}
+
+function Handle-PptComApi($rawPath, $req, $res, $mediaDir) {
+    if ($rawPath -eq "/api/ppt/init" -and $req.HttpMethod -eq "POST") {
+        try {
+            $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres
+            Send-Json $res @{ ok = $true; slides = $pres.Slides.Count; current = if ($ssWin) { $ssWin.View.CurrentShowPosition } else { 1 } }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/save" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir
+            $safe = [System.IO.Path]::GetFileNameWithoutExtension($body.name) + ".pptx"
+            $dest = Join-Path $mediaDir $safe
+            $pres.SaveCopyAs($dest)
+            Send-Json $res @{ ok = $true; file = $safe }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/load" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $safe = [System.IO.Path]::GetFileName($body.file)
+            $src = Join-Path $mediaDir $safe
+            if (-not (Test-Path $src)) { throw "Saved PPTX not found: $safe" }
+            $app = Get-PptApp
+            while ($app.SlideShowWindows.Count -gt 0) { $app.SlideShowWindows.Item(1).View.Exit() }
+            if ($null -ne $script:masterPres) { $script:masterPres.Saved = -1; $script:masterPres.Close() }
+            $masterPath = Join-Path $mediaDir "_ShowMaster.pptx"
+            Copy-Item -Path $src -Destination $masterPath -Force
+            Unblock-File -Path $masterPath -ErrorAction SilentlyContinue
+            $script:masterPres = $app.Presentations.Open($masterPath, 0, 0, -1)
+            $ssWin = Start-StageSlideShow $script:masterPres
+            Send-Json $res @{ ok = $true; slides = $script:masterPres.Slides.Count }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/close" -and $req.HttpMethod -eq "POST") {
+        Close-PptCleanly
+        Send-Json $res @{ ok = $true }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/insert" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir
+            $rel = $body.file.Replace('/', '\').TrimStart('\')
+            $full = Join-Path $mediaDir $rel
+            if ($rel.Contains("..") -or -not (Test-Path $full)) { throw "File not found: $rel" }
+            $startIdx = $pres.Slides.Count + 1
+            if ($body.kind -eq "ppt") { $added = $pres.Slides.InsertFromFile($full, $pres.Slides.Count, 1, -1); $endIdx = $startIdx + $added - 1 }
+            else { $endIdx = Insert-MediaSlide $pres $full $body.kind }
+            Send-Json $res @{ ok = $true; startSlide = $startIdx; endSlide = $endIdx; total = $pres.Slides.Count }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/sync") {
+        try {
+            $app = Get-PptApp; $pres = Ensure-MasterPresentation $mediaDir; $list = @()
+            for ($i = 1; $i -le $pres.Slides.Count; $i++) {
+                $sl = $pres.Slides.Item($i)
+                $title = if ($i -eq 1) { "Stage Blackout (Slide 1)" } elseif ($sl.Shapes.HasTitle -eq -1) { $sl.Shapes.Title.TextFrame.TextRange.Text } else { "Slide $i" }
+                $list += @{ index = $i; title = $title.Trim(); hidden = ($sl.SlideShowTransition.Hidden -eq -1) }
+            }
+            $hasWin = ($app.SlideShowWindows.Count -gt 0)
+            Send-Json $res @{
+                ok = $true; frozen = ($script:frozenTempSlide -gt 0); slides = $list
+                current = if ($hasWin) { $app.SlideShowWindows.Item(1).View.CurrentShowPosition } else { 0 }
+                state = if ($hasWin) { [int]$app.SlideShowWindows.Item(1).View.State } else { 0 }
+            }
+        } catch { Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/ppt/nav" -and $req.HttpMethod -eq "POST") {
+        try {
+            $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+            $pres = Ensure-MasterPresentation $mediaDir; $ssWin = Start-StageSlideShow $pres; $view = $ssWin.View
+            switch ($body.action) {
+                "focus"    { $ssWin.Activate() }
+                "next"     { $view.State = 1; $view.Next() }
+                "prev"     { $view.State = 1; $view.Previous() }
+                "goto"     { $view.State = 1; $view.GotoSlide([int]$body.slide) }
+                "blackout" { $view.State = if ($body.active) { 3 } else { 1 } }
+                "freeze"   {
+                    if ($body.active -and $script:frozenTempSlide -eq 0) {
+                        $dup = $pres.Slides.Item($view.CurrentShowPosition).Duplicate()
+                        $script:frozenTempSlide = $dup.SlideIndex; $view.GotoSlide($script:frozenTempSlide)
+                    } elseif (-not $body.active -and $script:frozenTempSlide -gt 0) {
+                        $view.GotoSlide([Math]::Max(1, $script:frozenTempSlide - 1))
+                        $pres.Slides.Item($script:frozenTempSlide).Delete(); $script:frozenTempSlide = 0
+                    }
+                }
+            }
+            Send-Json $res @{ ok = $true; current = $view.CurrentShowPosition; state = [int]$view.State; frozen = ($script:frozenTempSlide -gt 0) }
+        } catch { $res.StatusCode = 500; Send-Json $res @{ ok = $false; error = $_.Exception.Message } }
+        return $true
+    }
+
+    return $false
+}
+
+
+
+=== FILE: ps\remote-api.ps1 ===
+$script:phoneQueue = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+function Handle-RemoteApi($rawPath, $req, $res) {
+    if ($rawPath -eq "/api/phone-cmd" -and $req.HttpMethod -eq "POST") {
+        $cmdObj = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
+        [void]$script:phoneQueue.Add($cmdObj)
+        Send-Json $res @{ ok = $true }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/poll") {
+        $items = @()
+        while ($script:phoneQueue.Count -gt 0) {
+            $items += $script:phoneQueue
+            $script:phoneQueue.RemoveAt(0)
+        }
+        $json = if ($items.Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject @($items) -Compress }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $res.ContentType = "application/json; charset=utf-8"
+        $res.OutputStream.Write($bytes, 0, $bytes.Length)
+        $res.Close()
+        return $true
+    }
+
+    return $false
+}
+
+
+
+=== FILE: ps\screens.ps1 ===
+function Handle-ScreensApi($rawPath, $res) {
+    if ($rawPath -eq "/api/info") {
+        $localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+            $_.InterfaceAlias -notmatch "Loopback|vEthernet|WSL|Docker|Bluetooth|Virtual" -and
+            $_.IPAddress -notlike "169.254.*" -and $_.AddressState -eq "Preferred"
+        } | Select-Object -First 1).IPAddress
+        if (-not $localIP) { $localIP = "127.0.0.1" }
+        Send-Json $res @{ ip = $localIP; port = 8765 }
+        return $true
+    }
+
+    if ($rawPath -eq "/api/screens") {
+        $sec = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+        $data = if ($sec) { @{ hasSecond = $true; x = $sec.Bounds.X; y = $sec.Bounds.Y; w = $sec.Bounds.Width; h = $sec.Bounds.Height } }
+                else { @{ hasSecond = $false; x = 80; y = 80; w = 1024; h = 600 } }
+        Send-Json $res $data
+        return $true
+    }
+
+    if ($rawPath -eq "/api/focus-browser") {
+        $wshell = New-Object -ComObject WScript.Shell
+        Get-Process msedge -ErrorAction SilentlyContinue | Where-Object {
+            $_.MainWindowTitle -ne "" -and $_.MainWindowTitle -notmatch "Show Control|Projector Output"
+        } | ForEach-Object { $wshell.AppActivate($_.Id) | Out-Null }
+        Send-Json $res @{ ok = $true }
+        return $true
+    }
+
+    return $false
+}
+
+
+
+=== FILE: bridge.ps1 ===
+Add-Type -AssemblyName System.Windows.Forms
+$Host.UI.RawUI.WindowTitle = "ShowBridge"
+$port = 8765
+
+# Auto-load all backend API modules in ps\
+$psDir = Join-Path $PSScriptRoot "ps"
+if (Test-Path $psDir) {
+    Get-ChildItem -Path $psDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
+        . $_.FullName
+    }
+}
+
+# Ensure plugin zone folders exist
+$pluginsRoot = Join-Path $PSScriptRoot "plugins"
+$zones = @("slot-header-actions", "slot-cue-top", "slot-toolbar", "slot-cue-panel", "slot-stage-panel")
+foreach ($z in $zones) {
+    $zPath = Join-Path $pluginsRoot $z
+    if (!(Test-Path $zPath)) { New-Item -ItemType Directory -Path $zPath -Force | Out-Null }
+}
+
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://+:$port/")
+try { $listener.Start() } catch {
+    $listener = New-Object System.Net.HttpListener
+    $listener.Prefixes.Add("http://127.0.0.1:$port/")
+    $listener.Start()
+}
+
+$mediaDir = Join-Path $PSScriptRoot "Media"
+if (!(Test-Path $mediaDir)) { New-Item -ItemType Directory -Path $mediaDir | Out-Null }
+
+$mimeTypes = @{
+    ".html" = "text/html; charset=utf-8"; ".css" = "text/css; charset=utf-8"; ".js" = "application/javascript; charset=utf-8"
+    ".json" = "application/json; charset=utf-8"; ".png" = "image/png"; ".jpg" = "image/jpeg"; ".jpeg" = "image/jpeg"
+    ".gif" = "image/gif"; ".webp" = "image/webp"; ".svg" = "image/svg+xml"; ".mp3" = "audio/mpeg"; ".wav" = "audio/wav"
+    ".ogg" = "audio/ogg"; ".m4a" = "audio/mp4"; ".mp4" = "video/mp4"; ".mov" = "video/quicktime"
+    ".pdf" = "application/pdf";
+}
+
+function Send-Json($res, $obj) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $obj -Compress))
+    $res.ContentType = "application/json; charset=utf-8"
+    $res.OutputStream.Write($bytes, 0, $bytes.Length)
+    $res.Close()
+}
+
+Write-Host "Show Server running on port $port" -ForegroundColor Green
+
+while ($listener.IsListening) {
+    try {
+        $context = $listener.GetContext()
+        $req = $context.Request; $res = $context.Response
+        $rawPath = [System.Uri]::UnescapeDataString($req.Url.AbsolutePath)
+
+        if ($rawPath -eq "/api/shutdown") {
+            Send-Json $res @{ status = "stopping" }
+            if (Get-Command Close-PptCleanly -ErrorAction SilentlyContinue) { Close-PptCleanly }
+            Start-Sleep -Milliseconds 400
+            DisplaySwitch.exe /clone
+            Start-Sleep -Seconds 1
+            Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like "*ShowControllerEdge*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            break
+        }
+
+        if ($rawPath -eq "/api/plugins") {
+            $manifest = @{}
+            foreach ($z in $zones) {
+                $zPath = Join-Path $pluginsRoot $z
+                $files = @(Get-ChildItem -Path $zPath -Filter "*.js" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { "/plugins/$z/$($_.Name)" })
+                $manifest[$z] = $files
+            }
+            Send-Json $res $manifest
+            continue
+        }
+
+        if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
+        if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
+
+        if ($rawPath -eq "/") { $rawPath = "/control.html" }
+        $rel = $rawPath.TrimStart('/').Replace('/', '\')
+        if ($rel.Contains("..")) { $res.StatusCode = 403; $res.Close(); continue }
+
+        $target = Join-Path $PSScriptRoot $rel
+        if (Test-Path $target -PathType Leaf) {
+            $ext = [System.IO.Path]::GetExtension($target).ToLower()
+            $res.ContentType = if ($mimeTypes.ContainsKey($ext)) { $mimeTypes[$ext] } else { "application/octet-stream" }
+            $bytes = [System.IO.File]::ReadAllBytes($target)
+            $res.ContentLength64 = $bytes.Length
+            $res.OutputStream.Write($bytes, 0, $bytes.Length)
+        } else { $res.StatusCode = 404 }
+        $res.Close()
+    } catch {}
+}
+$listener.Stop()
+
+
+
+=== FILE: Bundle_for_Debug.bat ===
+@echo off
+title ShowController - Debug Code Bundler
+cd /d "%~dp0"
+
+echo Bundling all source files into project_bundle.txt...
+
+powershell -NoProfile -Command "$root = (Get-Location).Path + '\'; Get-ChildItem -Recurse -File -Include *.bat,*.ps1,*.html,*.css,*.js | Where-Object { $_.FullName -notlike '*\Media\*' } | ForEach-Object { '=== FILE: ' + $_.FullName.Replace($root, '') + ' ==='; Get-Content $_.FullName -Raw; \"`n\" } | Out-File -FilePath 'project_bundle.txt' -Encoding utf8"
+
+echo.
+echo [DONE] Created: %~dp0project_bundle.txt
+echo.
+pause
+
+
+
+=== FILE: control.html ===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="icon" href="data:,">
+  <title>Show Control Deck</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="panel">
+    <h2 id="cue-panel-header">
+      <span>Master Cue List</span>
+      <span id="slot-header-actions"></span>
+    </h2>
+
+    <div id="slot-cue-top" class="slot-container"></div>
+    <div id="slot-toolbar" class="toolbar-row" style="flex-wrap:wrap;"></div>
+    <div id="slot-cue-panel" class="slot-container" style="flex:1; min-height:0;"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Stage Controls</h2>
+    <div id="slot-stage-panel" class="controls" style="flex:1;"></div>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
+
+
+
+=== FILE: remote.html ===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Show Phone Remote</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #0f1115; color: #f1f5f9; margin: 0; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  h1 { font-size: 16px; text-transform: uppercase; letter-spacing: 1px; color: #38bdf8; margin: 0; text-align: center; }
+  button { padding: 15px; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; color: #fff; background: #334155; cursor: pointer; touch-action: manipulation; }
+  button:active { transform: scale(0.98); filter: brightness(1.2); }
+  .btn-next { background: #16a34a; font-size: 20px; padding: 22px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .btn-black { background: #dc2626; }
+  .btn-inter { background: #d97706; }
+  .btn-freeze { background: #0284c7; }
+  .btn-panic { background: #7f1d1d; border: 2px solid #ef4444; margin-top: 4px; }
+  .box { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 14px; }
+  #toast { text-align: center; font-size: 12px; color: #4ade80; min-height: 16px; }
+</style>
+</head>
+<body>
+  <h1>Stage Phone Remote</h1>
+  <div id="toast">Ready</div>
+
+  <button class="btn-next" onclick="sendCmd({ type: 'NEXT' })">NEXT CUE ??/button>
+  <button onclick="sendCmd({ type: 'PREV' })">漎?PREVIOUS CUE</button>
+
+  <div class="grid-2">
+    <button class="btn-black" onclick="sendCmd({ type: 'BLACKOUT' })">BLACKOUT (B)</button>
+    <button class="btn-inter" onclick="sendCmd({ type: 'INTERMISSION' })">INTERMISSION (I)</button>
+    <button class="btn-freeze" onclick="sendCmd({ type: 'FREEZE' })">FREEZE (F)</button>
+    <button onclick="sendCmd({ type: 'STOP_AUDIO' })">STOP AUDIO</button>
+    <button style="background:#475569;" onclick="sendCmd({ type: 'BACK_PROJ_TAB' })">PROJECTOR TAB (W)</button>
+    <button style="background:#0369a1;" onclick="sendCmd({ type: 'FOCUS_PROJ' })">FOCUS SCREEN (P)</button>
+  </div>
+
+  <div class="box">
+    <strong style="font-size:12px; color:#94a3b8; text-transform:uppercase;">Push YouTube / Canva Link</strong>
+    <input type="text" id="link-url" placeholder="Paste YouTube or Canva link..." />
+    <div class="grid-2">
+      <button onclick="pushLink(false)">+ Add to Queue</button>
+      <button style="background:#7c3aed;" onclick="pushLink(true)">??Open Now</button>
+    </div>
+  </div>
+
+  <button class="btn-panic" onclick="if(confirm('Trigger Emergency Blackout?')) sendCmd({ type: 'PANIC' })">PANIC / EMERGENCY BLACKOUT</button>
+
+<script>
+  const toast = document.getElementById('toast');
+  async function sendCmd(payload) {
+    try {
+      await fetch('/api/phone-cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      toast.textContent = 'Sent: ' + payload.type;
+      setTimeout(() => { toast.textContent = ''; }, 1500);
+    } catch {
+      toast.textContent = 'Connection lost';
+    }
+  }
+
+  function pushLink(playNow) {
+    const input = document.getElementById('link-url');
+    const url = input.value.trim();
+    if (!url) return;
+    sendCmd({ type: 'ADD_LINK', url, playNow });
+    input.value = '';
+  }
+</script>
+</body>
+</html>
+
+
+
+=== FILE: Setup_Wifi_Remote.bat ===
+@echo off
+title ShowController - Wi-Fi Remote Permission Setup
+
+:: Automatically request Administrator privileges if not already elevated
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Requesting Administrator permission for Wi-Fi Remote setup...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
+
+echo ========================================================
+echo   Configuring Windows Firewall ^& Wi-Fi Remote ^(Port 8765^)
+echo ========================================================
+echo.
+
+netsh advfirewall firewall delete rule name="ShowBridge" >nul 2>&1
+netsh advfirewall firewall add rule name="ShowBridge" dir=in action=allow protocol=TCP localport=8765
+
+netsh http delete urlacl url=http://+:8765/ >nul 2>&1
+netsh http add urlacl url=http://+:8765/ user=Everyone
+
+echo.
+echo [SUCCESS] Your phone can now connect over Wi-Fi!
+echo.
+pause
+
+
+
+=== FILE: Start_Show.bat ===
+@echo off
+title Show Controller Launcher
+cd /d "%~dp0"
+
+:: 1. Extend Windows displays
+DisplaySwitch.exe /extend
+timeout /t 2 /nobreak >nul
+
+:: 2. Start the local PowerShell server minimized
+start "" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bridge.ps1"
+timeout /t 2 /nobreak >nul
+
+:: 3. Open Control Deck directly in isolated Edge App instance
+start "" msedge --app="http://localhost:8765/control.html" --user-data-dir="%TEMP%\ShowControllerEdge"
+exit
+
+
+
+=== FILE: Stop_Show.bat ===
+@echo off
+title Stop Show and Restore Display
+
+:: 1. Tell bridge.ps1 to shut down gracefully
+powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'http://localhost:8765/api/shutdown' -UseBasicParsing -TimeoutSec 2 | Out-Null } catch {}"
+
+:: 2. Force-close ShowBridge terminal and ShowController Edge app
+taskkill /f /fi "WINDOWTITLE eq ShowBridge*" >nul 2>&1
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name = 'msedge.exe'\" | Where-Object { $_.CommandLine -like '*ShowControllerEdge*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
+:: 3. Restore Duplicate display
+DisplaySwitch.exe /clone
+exit
+
+
+
+=== FILE: style.css ===
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f1115;
+  color: #f1f5f9;
+  margin: 0;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  height: 100vh;
+}
+.panel {
+  background: #1a1d24;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #2a2f3a;
+}
+h2 {
+  margin: 0 0 10px 0;
+  font-size: 13px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.preview-strip {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.preview-card {
+  background: #111318;
+  border: 1px solid #2d3340;
+  border-radius: 8px;
+  padding: 10px;
+}
+.preview-card span {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 4px;
+}
+.preview-card strong {
+  font-size: 14px;
+  color: #38bdf8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+#dropzone {
+  border: 2px dashed #475569;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  color: #94a3b8;
+  margin-bottom: 10px;
+  font-size: 13px;
+  transition: 0.15s;
+}
+#dropzone.drag {
+  border-color: #38bdf8;
+  background: #0f172a;
+  color: #fff;
+}
+.toolbar-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+select, input[type="text"], input[type="number"] {
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #fff;
+  font-size: 13px;
+}
+select, input[type="text"] { flex: 1; }
+button {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #334155;
+  color: #fff;
+  font-size: 13px;
+}
+button:hover { filter: brightness(1.15); }
+#cue-list {
+  flex: 1;
+  min-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 8px 64px 8px;
+  background: #13161c;
+  border: 1px dashed #2d3340;
+  border-radius: 8px;
+}
+.cue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  background: #242832;
+  border-radius: 6px;
+  border-left: 4px solid transparent;
+  cursor: grab;
+  font-size: 13px;
+}
+.cue-item.active {
+  background: #1e3a8a;
+  border-left-color: #38bdf8;
+}
+.cue-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px;
+}
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #0f172a;
+  text-transform: uppercase;
+  margin-right: 8px;
+  font-weight: 700;
+}
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+.btn-go { background: #16a34a; font-size: 16px; padding: 14px; }
+.btn-proj { background: #0284c7; }
+.btn-danger { background: #7f1d1d; margin-left: 4px; }
+.slot-container { display: flex; flex-direction: column; gap: 8px; }
+
+/* Phase 2: Stage Overlays & Audio Box */
+.btn-black.active { background: #dc2626; box-shadow: 0 0 10px rgba(220, 38, 38, 0.55); }
+.btn-inter.active { background: #d97706; }
+.btn-panic { background: #991b1b; border: 1px solid #ef4444; font-size: 14px; padding: 12px; margin-top: 4px; }
+.control-box { background: #13161c; padding: 10px; border-radius: 8px; border: 1px solid #262b36; font-size: 13px; }
+.control-box label { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 6px; }
+
+
+

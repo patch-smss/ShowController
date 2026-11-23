@@ -54,6 +54,8 @@ while ($listener.IsListening) {
 
         if ($rawPath -eq "/api/shutdown") {
             Send-Json $res @{ status = "stopping" }
+            if (Get-Command Close-PptCleanly -ErrorAction SilentlyContinue) { Close-PptCleanly }
+            Start-Sleep -Milliseconds 400
             DisplaySwitch.exe /clone
             Start-Sleep -Seconds 1
             Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like "*ShowControllerEdge*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -72,6 +74,7 @@ while ($listener.IsListening) {
         }
 
         if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue) { if (Handle-ScreensApi $rawPath $res) { continue } }
+        if (Get-Command Handle-PptComApi -ErrorAction SilentlyContinue)  { if (Handle-PptComApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-MediaApi -ErrorAction SilentlyContinue)   { if (Handle-MediaApi $rawPath $req $res $mediaDir) { continue } }
         if (Get-Command Handle-RemoteApi -ErrorAction SilentlyContinue)  { if (Handle-RemoteApi $rawPath $req $res) { continue } }
 

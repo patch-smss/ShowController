@@ -1,112 +1,51 @@
-============================================================
-ShowController 舞台簡報與影音播放控制系統 — 使用說明書
-============================================================
+========================================================================
+SHOWCONTROLLER - LOCAL POWERPOINT COM & WEB SHOW DECK
+========================================================================
 
-ShowController 是一套專為 Windows 設計的輕量化雙螢幕舞台播控系統，結合瀏覽器控制面板、獨立觀眾投影畫面、Wi-Fi 手機遙控器與本地端 PowerShell 伺服器，讓現場音控與簡報切換更加穩定流暢。
+OVERVIEW
+--------
+ShowController is a modular, zero-install Windows show controller that pairs a
+browser-based Control Deck (control.html in Microsoft Edge App mode) with a
+local PowerShell HTTP/COM bridge (bridge.ps1) on port 8765.
 
-------------------------------------------------------------
-一、 系統檔案與架構說明
-------------------------------------------------------------
+- VISUAL STAGE (Monitor 2 via PowerPoint COM):
+  All .pptx, .ppt, image, and video cues are inserted directly into a single
+  master presentation (Media\_ShowMaster.pptx) inside Microsoft PowerPoint.
+  This preserves native PowerPoint animations/transitions, allows live slide
+  editing on Monitor 1, and automatically unblocks imported files so Protected
+  View never interrupts a show.
 
-[啟動與系統設定腳本]
-* Start_Show.bat
-  一鍵啟動腳本。自動將 Windows 顯示模式切換為「延伸」，背景啟動本地伺服器（連接埠 8765），並開啟獨立的控制面板視窗。
-* Stop_Show.bat
-  一鍵關閉腳本。通知伺服器安全關閉、結束相關視窗與 PowerPoint 進程，並將螢幕恢復為「同步顯示（鏡像）」模式。
-* Setup_Wifi_Remote.bat
-  初次使用手機遙控前需執行一次（以系統管理員身分執行），用於設定 Windows 防火牆與網路權限。
+- SILENT AUDIO ENGINE (Monitor 1):
+  Audio cues (.mp3, .wav, .ogg, .m4a) play silently inside control.html via a
+  hidden <audio> player with 1.5s fade-in and fade-out, continuing smoothly
+  across slide changes without needing VBA macros.
 
-[核心程式與介面檔案]
-* bridge.ps1
-  本地端 PowerShell 伺服器，負責提供網頁介面、偵測外接螢幕座標、控制 PowerPoint 放映與轉發手機遙控指令。
-* control.html 與 style.css
-  音控人員操作的主控台介面，可建立、拖曳排序與觸發播放清單（Cue List），並調整舞台遮罩與音效淡入淡出。
-* projector.html
-  輸出至外接螢幕或投影機的全螢幕觀眾畫面，負責呈現圖片、影片、PDF、背景音樂、黑幕（Blackout）、畫面凍結與中場休息畫面。
-* remote.html
-  專為手機瀏覽器設計的觸控遙控網頁。
+- DROP-IN PLUGINS (plugins\):
+  control.html and js\app.js are frozen core files. Any .js file placed inside
+  plugins\<zone>\ is auto-loaded at startup (sorted alphabetically; 01-, 02-
+  prefixes control top-to-bottom order).
 
-[前端模組（js 資料夾）與後端 API（ps 資料夾）]
-* js/app.js：核心控制中樞，負責串接播放清單、快捷鍵、網頁分頁管理與各功能模組。
-* js/store.js：管理目前播放狀態、清單渲染、複製項目至清單末端與拖曳排序。
-* js/media.js：處理本機圖片、音訊、影片與 PDF 的拖放匯入與檔案瀏覽器選取。
-* js/embeds.js：負責新增 YouTube 與 Canva 網頁連結至播放清單。
-* js/ppt.js：將 PowerPoint 簡報上傳至 Media 資料夾，並提供畫面凍結功能。
-* js/stage.js：控制黑幕、中場休息背景圖、1.5 秒音效淡入淡出、結束動作與緊急全黑。
-* js/remote.js：產生手機配對 QR Code，並每 0.6 秒輪詢一次手機端傳來的操作指令。
-* ps/screens.ps1、ps/media-api.ps1、ps/remote-api.ps1：分別處理螢幕座標偵測、檔案上傳與簡報控制、手機指令佇列。
+QUICK START
+-----------
+1. (Optional, one-time) Run Setup_Wifi_Remote.bat as Administrator to allow
+   Wi-Fi phone remote connections on TCP port 8765.
+2. Double-click Start_Show.bat to extend displays, launch bridge.ps1, and
+   open the Control Deck.
+3. Add cues via Drag & Drop, + Browse Media, + PowerPoint, or Paste Link.
+   Visuals append immediately into _ShowMaster.pptx so "Go" is instant.
+4. Click "Save" to save your .json cue list + Master .pptx deck, or "Load"
+   to recall a saved show for live editing and playback.
+5. Click "End Show & Exit" to optionally save the Master .pptx, close
+   PowerPoint cleanly, and restore mirrored displays. (Use Stop_Show.bat if
+   you ever need an emergency force-close.)
 
-------------------------------------------------------------
-二、 安裝與日常操作流程
-------------------------------------------------------------
-
-[初次使用 Wi-Fi 手機遙控設定（僅需執行一次）]
-1. 在 Setup_Wifi_Remote.bat 上按右鍵，選擇「以系統管理員身分執行」。
-2. 畫面出現 [SUCCESS] 提示字樣後，即可關閉視窗。
-
-[演出前啟動步驟]
-1. 連接外接投影機或第二螢幕。
-2. 雙擊執行 Start_Show.bat，系統會自動延伸桌面並在主螢幕開啟「Show Control Deck」主控台。
-3. 點擊主控台右側的「Open / Focus Projector」（或按鍵盤 P 鍵），將觀眾投影視窗開啟於第二螢幕。
-4. 在第二螢幕的投影視窗右上角點擊「Go Fullscreen (F11)」進入全螢幕，此步驟可隱藏滑鼠游標並解除瀏覽器對影音自動播放的限制。
-
-[演出結束關閉步驟]
-* 點擊主控台右下角的「End Show & Exit」（或執行 Stop_Show.bat），系統會自動關閉 PowerPoint、清除暫存簡報檔、停止伺服器，並將螢幕恢復為鏡像模式。
-
-------------------------------------------------------------
-三、 支援的媒體格式與播放邏輯
-------------------------------------------------------------
-
-* 圖片（.png、.jpg、.jpeg、.gif、.webp、.svg）
-  自動依螢幕比例縮放並置中顯示，不會變形裁切。
-
-* 影片（.mp4、.mov、.webm）
-  全螢幕自動播放，播放完畢後主控台狀態會自動更新為「(Finished)」。
-
-* 音訊（.mp3、.wav、.ogg、.m4a）
-  於背景播放（支援 1.5 秒平滑淡入與淡出）。切換至圖片或簡報時背景音樂會持續播放，直到手動點擊「Stop Audio Now」或觸發下一首音訊為止。
-
-* PDF 文件（.pdf）
-  以無工具列的滿版檢視器開啟，適合展示歌詞、流程表或靜態文件。
-
-* PowerPoint 簡報（.ppt、.pptx）
-  點擊「+ PowerPoint」匯入後，觸發該項目會自動將網頁投影切為黑幕，並直接以 PowerPoint 全螢幕放映模式（/S）啟動簡報；當切換至下一個非簡報項目時，系統會自動關閉 PowerPoint。
-
-* YouTube 與 Canva 網頁連結
-  貼上網址並點擊「+ Add Link」即可加入清單。建議在演出前先點擊該項目的「Pre-load」按鈕預先在背景分頁開啟（可先行跳過廣告或等待載入），正式輪到該項目時點擊「Go」即可直接切換至該分頁畫面；結束後按 W 鍵可切回主投影分頁。
-
-------------------------------------------------------------
-四、 舞台控制與鍵盤快捷鍵
-------------------------------------------------------------
-
-（註：當游標停留在文字輸入框內時，鍵盤快捷鍵會自動暫停作用。）
-
-* 下一首 / 下一個項目（NEXT CUE）：空白鍵（Space）、右方向鍵（Right）、Page Down
-* 上一個項目（PREVIOUS CUE）：左方向鍵（Left）、Page Up
-* 黑幕遮罩（BLACKOUT）：B 鍵 或 句點鍵（.）。啟動時預設為開啟狀態，切換時具備 0.25 秒平滑淡入淡出效果。
-* 中場休息畫面（INTERMISSION）：I 鍵。預設顯示 Media 資料夾內的 intermission.png（或 .jpg），亦可透過「Set Intermission / Backdrop Image...」隨時指定其他圖片。
-* 畫面凍結（FREEZE）：F 鍵。將當前投影畫面或影片定格在最上層，方便音控人員在後台調整清單而不被觀眾看見。
-* 切回主投影分頁（Back to Projector Tab）：W 鍵。在展示完 YouTube 或 Canva 網頁分頁後，快速將焦點切回主投影畫面。
-* 開啟 / 聚焦投影視窗（Open / Focus Projector）：P 鍵。
-* 演出結束後動作（After Last Cue）：可透過下拉選單設定最後一個項目播完再按 Next 時，要「停留在目前畫面」、「顯示中場休息畫面」或「進入黑幕」。
-* 緊急全黑（PANIC / EMERGENCY BLACKOUT）：立即無淡出切斷所有聲音、清除畫面並強制進入黑幕狀態。
-
-------------------------------------------------------------
-五、 Wi-Fi 手機遙控器使用方式
-------------------------------------------------------------
-
-1. 確認手機與播控電腦連接至同一個 Wi-Fi 無線網路。
-2. 使用手機相機掃描主控台右下角的 QR Code（或在手機瀏覽器輸入畫面上顯示的 http://電腦IP:8765/remote.html 網址）。
-3. 手機開啟遙控網頁後，即可遠端操作「上/下一個項目」、「黑幕」、「中場休息」、「畫面凍結」、「停止音訊」、「緊急全黑」，也能直接從手機貼上 YouTube 或 Canva 網址並推播至電腦立即播放或加入排程。
-
-------------------------------------------------------------
-六、 後端伺服器 API 摘要（bridge.ps1）
-------------------------------------------------------------
-
-* GET /api/screens：取得外接第二螢幕的解析度與座標位置。
-* GET /api/info：取得本機區域網路 IPv4 位址與連接埠（8765），供產生 QR Code 使用。
-* POST /api/upload-media：將選取的簡報或檔案儲存至本地 Media 資料夾。
-* POST /api/ppt：控制本機 PowerPoint 程式啟動全螢幕放映或強制關閉。
-* POST /api/cleanup-temp：結束演出時自動清理暫存的簡報複本。
-* POST /api/phone-cmd 與 GET /api/poll：處理手機遙控器與電腦主控台之間的指令佇列。
-* GET /api/shutdown：將顯示器恢復為鏡像模式、關閉獨立 Edge 視窗並停止伺服器。
+KEYBOARD SHORTCUTS
+------------------
+  Space / Right / PageDown  : Next Cue
+  Left / PageUp             : Previous Cue
+  B or .                    : Toggle Blackout
+  I                         : Toggle Intermission
+  F                         : Freeze Live Slide (edit safely, press F again to update)
+  P                         : Launch / Focus PowerPoint Stage on Monitor 2
+  W                         : Refocus Browser Window
+========================================================================

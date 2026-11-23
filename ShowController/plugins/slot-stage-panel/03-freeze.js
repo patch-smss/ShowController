@@ -5,11 +5,18 @@ export function init(container, ctx) {
   btn.id = 'btn-freeze';
   btn.textContent = 'FREEZE (F)';
 
-  const toggleFreeze = () => {
+  const toggleFreeze = async () => {
     isFrozen = !isFrozen;
     btn.textContent = isFrozen ? 'UNFREEZE (F)' : 'FREEZE (F)';
     btn.style.background = isFrozen ? '#0284c7' : '';
     ctx.channel.postMessage({ type: 'FREEZE', active: isFrozen });
+    try {
+      await fetch('/api/ppt/nav', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'freeze', active: isFrozen })
+      });
+    } catch {}
   };
 
   btn.onclick = toggleFreeze;

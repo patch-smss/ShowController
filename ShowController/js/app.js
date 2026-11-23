@@ -1,6 +1,6 @@
 import { store, channel } from '/js/store.js';
+import { playAudioCue, stopAudio } from '/js/audio-engine.js';
 
-let projectorWin = null;
 const listeners = new Map();
 
 const ctx = {
@@ -27,11 +27,13 @@ const ctx = {
 
 store.onChange = () => ctx.emit('STORE_UPDATED');
 
-async function ensureProjectorOpen() {
-  if (!projectorWin || projectorWin.closed) {
-    await openProjector();
-    await new Promise(r => setTimeout(r, 600));
-  }
+async function pptPost(endpoint, body = {}) {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return res.json();
 }
 
 export async function triggerCue(index) {
@@ -41,18 +43,27 @@ export async function triggerCue(index) {
   store.setActive(cue.id);
   ctx.emit('CUE_TRIGGER', { cue, index });
 
-  if (cue.kind === 'ppt') {
-    ctx.emit('SET_BLACKOUT', { active: true });
-    channel.postMessage({ type: 'CUE', cue });
+  if (cue.kind === 'audio') {
+    playAudioCue(cue, ctx.state.audioPrefs, () => {
+      ctx.state.finishedText = '-- (Finished)';
+      ctx.emit('STORE_UPDATED');
+    });
+    pptPost('/api/ppt/nav', { action: 'focus' }).catch(() => {});
     return;
   }
+
   if (cue.kind === 'youtube' || cue.kind === 'canva') return;
 
-  await ensureProjectorOpen();
-  if (['image', 'video', 'pdf'].includes(cue.kind)) {
-    ctx.emit('SET_BLACKOUT', { active: false });
+  if (['ppt', 'image', 'video'].includes(cue.kind)) {
+    if (!cue.startSlide) {
+      const ins = await pptPost('/api/ppt/insert', { file: cue.src, kind: cue.kind });
+      if (ins.ok) { cue.startSlide = ins.startSlide; cue.endSlide = ins.endSlide; }
+    }
+    if (cue.startSlide) {
+      ctx.emit('SET_BLACKOUT', { active: false });
+      await pptPost('/api/ppt/nav', { action: 'goto', slide: cue.startSlide });
+    }
   }
-  channel.postMessage({ type: 'CUE', cue, ...ctx.state.audioPrefs });
 }
 
 export function nextCue() {
@@ -73,26 +84,25 @@ export function prevCue() {
 }
 
 export async function openProjector() {
-  if (projectorWin && !projectorWin.closed) { projectorWin.focus(); return; }
-  let s = { x: 80, y: 80, w: 1024, h: 600 };
-  try { s = await (await fetch('/api/screens')).json(); } catch {}
-  projectorWin = window.open('/projector.html', 'StageProjector', `left=${s.x},top=${s.y},width=${s.w},height=${s.h}`);
+  await pptPost('/api/ppt/init');
 }
 
 export async function endShow() {
-  if (!confirm('End show, close all windows, and restore mirrored display?')) return;
-  ctx.emit('END_SHOW');
-  const tempPpts = store.cues.filter(c => c.kind === 'ppt' && c.tempPpt).map(c => c.src);
-  if (tempPpts.length > 0) {
-    try {
-      await fetch('/api/cleanup-temp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: tempPpts })
-      });
-    } catch {}
+  if (!confirm('End show, close PowerPoint & windows, and restore mirrored display?')) return;
+  if (confirm('Save a copy of the Master PowerPoint presentation (.pptx) before closing?')) {
+    const defaultName = `Show_${new Date().toISOString().slice(0, 10)}`;
+    const name = prompt('Enter filename for Master PPTX (saved in Media folder):', defaultName);
+    if (name) {
+      await pptPost('/api/ppt/save', { name });
+    }
   }
-  channel.postMessage({ type: 'SHUTDOWN' });
+  stopAudio(false);
+  ctx.emit('END_SHOW');
+  await pptPost('/api/ppt/close');
+  const tempFiles = store.cues.filter(c => c.tempFile).map(c => c.src);
+  if (tempFiles.length > 0) {
+    try { await pptPost('/api/cleanup-temp', { files: tempFiles }); } catch {}
+  }
   fetch('/api/shutdown').catch(() => {});
 }
 
@@ -101,10 +111,12 @@ ctx.actions = {
   nextCue,
   prevCue,
   openProjector,
-  ensureProjectorOpen,
   endShow,
-  getProjectorWin: () => projectorWin,
-  closeWebWindow: () => channel.postMessage({ type: 'FOCUS_PROJECTOR_TAB' }),
+  pptPost,
+  stopAudio,
+  ensureProjectorOpen: openProjector,
+  getProjectorWin: () => null,
+  closeWebWindow: () => fetch('/api/focus-browser').catch(() => {}),
   preloadCue: (index) => {
     const cue = store.cues[index];
     if (cue) ctx.emit('CUE_PRELOAD', { cue, index });
@@ -128,14 +140,10 @@ ctx.actions = {
   } catch (err) { console.error('Plugin manifest error:', err); }
 })();
 
-channel.addEventListener('message', (e) => {
-  if (e.data?.type === 'MEDIA_ENDED') {
-    ctx.state.finishedText = '-- (Finished)';
-    ctx.emit('STORE_UPDATED');
-  }
-});
+ctx.on('STOP_AUDIO', () => stopAudio(ctx.state.audioPrefs.fadeOut));
+ctx.on('PANIC', () => stopAudio(false));
 
 setInterval(async () => {
   try { if (!(await fetch('/api/screens')).ok) throw new Error(); }
-  catch { channel.postMessage({ type: 'SHUTDOWN' }); window.close(); }
+  catch { window.close(); }
 }, 1500);
