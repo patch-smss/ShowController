@@ -75,6 +75,7 @@ while ($listener.IsListening) {
             continue
         }
 
+        if (Get-Command Handle-SettingsApi -ErrorAction SilentlyContinue)  { if (Handle-SettingsApi $rawPath $req $res) { continue } }
         if (Get-Command Handle-ScreensApi -ErrorAction SilentlyContinue)   { if (Handle-ScreensApi $rawPath $res) { continue } }
         if (Get-Command Handle-HotkeysApi -ErrorAction SilentlyContinue)   { if (Handle-HotkeysApi $rawPath $req $res) { continue } }
         if (Get-Command Handle-PptCoreApi -ErrorAction SilentlyContinue)   { if (Handle-PptCoreApi $rawPath $req $res $mediaDir) { continue } }

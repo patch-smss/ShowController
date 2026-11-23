@@ -3,10 +3,12 @@ function Insert-MediaSlide($pres, $fullPath, $kind) {
     $sl = $pres.Slides.Add($idx, 12)
     $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = 0
     $sw = $pres.PageSetup.SlideWidth; $sh = $pres.PageSetup.SlideHeight
+    $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ imageFit = "contain" } }
+
     if ($kind -eq "image") {
         $shp = $sl.Shapes.AddPicture($fullPath, 0, -1, 0, 0)
         $shp.LockAspectRatio = -1
-        $scale = [Math]::Min($sw / $shp.Width, $sh / $shp.Height)
+        $scale = if ($cfg.imageFit -eq "cover") { [Math]::Max($sw / $shp.Width, $sh / $shp.Height) } else { [Math]::Min($sw / $shp.Width, $sh / $shp.Height) }
         $shp.Width = $shp.Width * $scale
         $shp.Left = ($sw - $shp.Width) / 2; $shp.Top = ($sh - $shp.Height) / 2
     } elseif ($kind -eq "video") {

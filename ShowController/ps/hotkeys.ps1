@@ -23,6 +23,12 @@ public class GlobalHotkeyHost {
     private static Thread _thread;
     private static MsgWin _win;
     private static bool _active = false;
+    public static uint VkNext = 0x22, VkPrev = 0x21, VkBlack = 0xBE;
+
+    public static void Rebind(uint nextVk, uint prevVk, uint blackVk) {
+        VkNext = nextVk; VkPrev = prevVk; VkBlack = blackVk;
+        if (_active) { SetEnabled(false); Thread.Sleep(50); SetEnabled(true); }
+    }
 
     public static void SetEnabled(bool enable) {
         if (enable && !_active) {
@@ -34,11 +40,11 @@ public class GlobalHotkeyHost {
                     if (id == 2 || id == 4) Queue.Enqueue("PREV");
                     if (id == 5) Queue.Enqueue("BLACKOUT");
                 };
-                RegisterHotKey(_win.Handle, 1, 0, 0x22);
-                RegisterHotKey(_win.Handle, 2, 0, 0x21);
+                RegisterHotKey(_win.Handle, 1, 0, VkNext);
+                RegisterHotKey(_win.Handle, 2, 0, VkPrev);
                 RegisterHotKey(_win.Handle, 3, 0, 0x27);
                 RegisterHotKey(_win.Handle, 4, 0, 0x25);
-                RegisterHotKey(_win.Handle, 5, 0, 0xBE);
+                RegisterHotKey(_win.Handle, 5, 0, VkBlack);
                 Application.Run();
             });
             _thread.SetApartmentState(ApartmentState.STA);
@@ -58,7 +64,14 @@ public class GlobalHotkeyHost {
 "@
 
 $script:hotkeysEnabled = $true
-try { [GlobalHotkeyHost]::SetEnabled($true) } catch {}
+try {
+    if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) {
+        $cfg = Get-ShowSettings
+        [GlobalHotkeyHost]::Rebind([uint32]$cfg.hotkeys.next, [uint32]$cfg.hotkeys.prev, [uint32]$cfg.hotkeys.blackout)
+    } else {
+        [GlobalHotkeyHost]::SetEnabled($true)
+    }
+} catch {}
 
 function Handle-HotkeysApi($rawPath, $req, $res) {
     if ($rawPath -eq "/api/hotkeys/poll") {
@@ -76,11 +89,6 @@ function Handle-HotkeysApi($rawPath, $req, $res) {
         $body = (New-Object System.IO.StreamReader($req.InputStream)).ReadToEnd() | ConvertFrom-Json
         $script:hotkeysEnabled = [bool]$body.enabled
         try { [GlobalHotkeyHost]::SetEnabled($script:hotkeysEnabled) } catch {}
-        Send-Json $res @{ ok = $true; enabled = $script:hotkeysEnabled }
-        return $true
-    }
-
-    if ($rawPath -eq "/api/hotkeys/status") {
         Send-Json $res @{ ok = $true; enabled = $script:hotkeysEnabled }
         return $true
     }

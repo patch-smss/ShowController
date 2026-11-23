@@ -23,8 +23,9 @@ function Ensure-MasterPresentation($mediaDir) {
         if ($p.FullName -eq $masterPath) { $script:masterPres = $p; break }
     }
     if ($null -eq $script:masterPres) {
+        $cfg = if (Get-Command Get-ShowSettings -ErrorAction SilentlyContinue) { Get-ShowSettings } else { @{ aspectRatio = "16:9" } }
         $script:masterPres = $app.Presentations.Add(-1)
-        $script:masterPres.PageSetup.SlideSize = 16
+        $script:masterPres.PageSetup.SlideSize = if ($cfg.aspectRatio -eq "4:3") { 15 } else { 16 }
         $s1 = $script:masterPres.Slides.Add(1, 12)
         $s1.FollowMasterBackground = 0; $s1.Background.Fill.Solid(); $s1.Background.Fill.ForeColor.RGB = 0
         $script:masterPres.SaveAs($masterPath)
